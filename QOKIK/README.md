@@ -43,6 +43,8 @@ npm run dev
 
 打开终端输出的本地地址（默认 `http://127.0.0.1:5173`）。Vite 会把 `/api` 请求转发到本机 FastAPI。OpenAPI 文档位于 `http://127.0.0.1:8000/docs`。
 
+不要直接双击 `frontend/index.html` 打开；浏览器会以 `file://` 方式加载，无法运行 Vue 模块。请先启动上述 API 和前端服务，再访问 `http://127.0.0.1:5173`。
+
 ## 验证
 
 ```powershell
