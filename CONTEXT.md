@@ -37,3 +37,7 @@ The post author may directly change a lost report to `已找回` or a found noti
 **Post removal**: A post without related requests or reports may be deleted. A post with related records is withdrawn from public view while its handling history is retained.
 
 **Status notice**: Users see review and request outcomes in their post/request views. The first version sends no email, SMS, or push notification.
+
+## Current implementation
+
+The target stack is Vue 3/TypeScript/Vite with a Go/Gin API and PostgreSQL. The API uses local accounts, Argon2id password hashes, short-lived in-memory access JWTs, and rotating refresh JWTs in HttpOnly cookies. Docker Compose starts the API and database; Vite runs on the host. SQLite data is not migrated. The Go API, Compose setup, migrations, and frontend token flow are implemented, but PostgreSQL-backed integration and browser acceptance still need a running Docker Engine. Keep the legacy FastAPI implementation until those acceptance checks pass.

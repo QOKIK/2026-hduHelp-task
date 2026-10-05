@@ -1,39 +1,41 @@
 # 拾光 · 杭电校园失物招领
 
-一个本地优先的校园失物招领 Web 应用。访客可搜索已审核信息；注册用户可发布寻物/拾获信息、提交私密线索或认领并举报；管理员可审核内容、处理举报。当前使用本地账号，学号不经学校核验；暂不包含站内聊天、图片上传、消息推送或线上部署。
+本地优先的校园失物招领应用。访客可搜索已审核信息；注册用户可发布寻物/拾获信息、提交私密线索或认领并举报；管理员可审核内容、处理举报。学号当前只是账号标识，未连接学校统一认证。站内聊天、图片上传、消息推送和公网部署暂不包含。
 
 ## 技术栈
 
 - 前端：Vue 3、TypeScript、Vite
-- API：FastAPI、SQLite
-- 会话：HttpOnly Cookie；密码使用 PBKDF2-SHA256 哈希
+- API：Go、Gin、pgx、PostgreSQL
+- 认证：15 分钟 Access JWT（仅保存在前端内存），7 天 Refresh JWT（HttpOnly、SameSite=Strict Cookie，使用时轮换）
+- 密码：Argon2id
+- 本地服务：Docker Compose 启动 API 和 PostgreSQL；Vite 在宿主机运行
+
+本次迁移不会导入旧 SQLite 数据。PostgreSQL 是新数据库，原有用户需重新注册。已有的 `backend/data/hduhelp.sqlite3` 不会被新服务读取。
 
 ## 本地运行
 
-需要 Python 3.11+、Node.js 20+ 和 npm。
+需要 Docker Desktop（且 Docker Engine 已启动）、Node.js 20+ 和 npm。
 
-以下命令假设终端当前位于 `QOKIK/` 项目目录；若从整个仓库根目录开始，请先执行 `cd QOKIK`。
-
-### 1. 启动 API
-
-PowerShell：
+以下命令均从 `QOKIK/` 项目目录运行。首次先复制环境变量模板，并生成不同的随机密钥：
 
 ```powershell
-cd backend
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-$env:HDUHELP_DB = "./data/hduhelp.sqlite3"
-$env:HDUHELP_ADMIN_USERNAME = "moderator"
-$env:HDUHELP_ADMIN_PASSWORD = "请换成至少 10 位的本地密码"
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+Copy-Item .env.example .env
+$secret1 = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+$secret2 = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 ```
 
-数据库和管理员账号在 API 首次启动时初始化。管理员凭据通过进程环境变量传入；不要把真实密码提交到 Git。改密码时设置新密码不会自动覆盖已有管理员账号，请在数据库恢复或管理流程中处理。
+将 `$secret1` 和 `$secret2` 分别填入 `.env` 中的 `POSTGRES_PASSWORD` 和 `JWT_SECRET`，同时设置管理员用户名和强密码。`.env` 已加入 Git 忽略规则，切勿提交。
 
-### 2. 启动前端
+启动 API 和 PostgreSQL：
 
-另开终端：
+```powershell
+docker compose up --build -d
+Invoke-RestMethod http://127.0.0.1:8000/api/health
+```
+
+首次启动时，API 会运行版本化 SQL 迁移并创建初始管理员。若管理员用户名已被普通用户占用，服务会拒绝启动；请在 `.env` 中改用独立用户名。管理员只在空库首次初始化时创建。
+
+另开终端启动前端：
 
 ```powershell
 cd frontend
@@ -41,45 +43,55 @@ npm install
 npm run dev
 ```
 
-打开终端输出的本地地址（默认 `http://127.0.0.1:5173`）。Vite 会把 `/api` 请求转发到本机 FastAPI。OpenAPI 文档位于 `http://127.0.0.1:8000/docs`。
+打开 `http://127.0.0.1:5173`。Vite 将 `/api` 转发到 Docker 中的 Go API。不要直接双击 `frontend/index.html`，应先启动 API 与 Vite。
 
-不要直接双击 `frontend/index.html` 打开；浏览器会以 `file://` 方式加载，无法运行 Vue 模块。请先启动上述 API 和前端服务，再访问 `http://127.0.0.1:5173`。
+停止服务但保留数据库：
+
+```powershell
+docker compose down
+```
+
+如需删除本地 PostgreSQL 数据卷并重新开始（会清空新数据库）：
+
+```powershell
+docker compose down -v
+```
 
 ## 验证
 
 ```powershell
 cd backend
-python -m pytest -q
+go test ./...
+go vet ./...
 cd ..\frontend
 npm run build
 ```
 
-API 测试使用独立临时 SQLite 数据库。覆盖新内容审核、已通过版本修改、隐私边界、请求处理与检索权限。
+后端单元测试不依赖数据库。PostgreSQL API 集成测试使用隔离 schema，需提前在本地 Postgres 创建一次专用测试数据库：
 
-完整浏览器流程脚本位于 `frontend/e2e/`。首次需安装 Python Playwright 和 Chromium：
+```powershell
+docker compose exec db createdb -U hduhelp hduhelp_test
+$env:TEST_DATABASE_URL = "postgres://hduhelp:$secret1@127.0.0.1:5432/hduhelp_test?sslmode=disable"
+cd backend
+go test ./... -run TestPostgresAPIAuthAndModeration -count=1
+```
+
+测试会在该数据库中创建并删除独立 schema。请只将专用测试库配置到 `TEST_DATABASE_URL`。
+
+浏览器流程使用 Compose 中运行的 Go API，先确保 `.env` 内管理员账号对应新数据库初始化时的凭据，再在终端设置 `HDUHELP_E2E_ADMIN_PASSWORD` 并启动 E2E Vite：
 
 ```powershell
 python -m pip install playwright
 python -m playwright install chromium
-```
-
-启动 API（管理员环境变量和测试库只用于此演示）：
-
-```powershell
+$env:HDUHELP_E2E_ADMIN_PASSWORD = "与 .env 中的管理员密码相同"
 cd frontend
-$env:HDUHELP_DB = Join-Path $env:TEMP ("hduhelp-e2e-" + [guid]::NewGuid() + ".sqlite3")
-$env:HDUHELP_ADMIN_USERNAME = "moderator"
-$env:HDUHELP_ADMIN_PASSWORD = "e2e-moderator-password"
-python e2e/serve_api.py
-```
-
-另开两个终端，在 `QOKIK/frontend` 目录分别运行：
-
-```powershell
 npm run dev -- --config e2e/vite.config.ts
 ```
 
+另开终端运行：
+
 ```powershell
+cd QOKIK/frontend
 python e2e/journey.py
 ```
 
@@ -87,18 +99,18 @@ python e2e/journey.py
 
 1. 访客浏览公开信息，按失物/拾获、处理状态、地点或关键词检索。
 2. 用户注册并提交内容；管理员通过审核后公开。修改已通过内容时保留旧版本，审批后再替换。
-3. 失主可对拾获公告提交认领；知情者可对寻物启事发送线索。解释和联系方式仅对请求双方可见。
+3. 失主对拾获公告提交认领；知情者对寻物启事发送线索。解释和联系方式仅对请求双方可见。
 4. 发布者接受申请后，关联内容进入已找回/已归还状态，其他待处理申请关闭。
-5. 用户可举报公开内容或自己参与的私密请求。管理员只有在请求参与者举报后，才会在该举报记录中看到私密请求详情。
-6. 管理员账号必须通过环境变量预置；普通用户无法提升权限。
+5. 用户可举报公开内容或自己参与的私密请求。管理员只有在参与者举报后，才会看到该请求详情。
+6. Access JWT 过期后前端使用 Refresh JWT 换新；服务端记录令牌族，发现已消费的刷新令牌被重放时撤销该设备令牌族。
 
 ## API 概览
 
-- `/api/auth/*`：注册、登录、退出、当前账号
+- `/api/auth/*`：注册、登录、JWT 刷新、退出、当前账号
 - `/api/posts`：公开检索、查看、发布和更新
 - `/api/my/posts`、`/api/my/requests`：个人内容与申请
 - `/api/posts/{id}/requests`、`/api/requests/{id}/*`：私密申请处理
 - `/api/admin/reviews`、`/api/admin/reports`：审核和举报工作台
-- `/api/health`：本地健康检查
+- `/api/health`：确认 API 与 PostgreSQL 可用
 
-管理区不会提供用户自助赋予管理员身份的接口。部署、学校统一认证接入、ICP备案和生产运维均不在当前版本范围内。
+API 认证使用 `Authorization: Bearer <access_token>`。Refresh JWT 只能通过 HttpOnly Cookie 发送。管理端没有普通用户自助提升管理员权限的接口。生产部署、学校统一认证接入和 ICP 备案仍不在当前实现范围内。

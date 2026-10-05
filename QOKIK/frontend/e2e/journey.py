@@ -1,5 +1,6 @@
 from playwright.sync_api import expect, sync_playwright
 from time import time_ns
+import os
 
 
 def register(page, username, nickname, student_number):
@@ -35,8 +36,8 @@ def main():
         admin.goto("http://127.0.0.1:5174")
         admin.wait_for_load_state("networkidle")
         admin.get_by_role("button", name="登录 / 注册").click()
-        admin.get_by_label("用户名").fill("moderator")
-        admin.get_by_label("密码").fill("e2e-moderator-password")
+        admin.get_by_label("用户名").fill(os.environ.get("HDUHELP_E2E_ADMIN_USERNAME", "moderator"))
+        admin.get_by_label("密码").fill(os.environ["HDUHELP_E2E_ADMIN_PASSWORD"])
         admin.locator(".account-dialog form button").click()
         admin.get_by_role("button", name="管理工作台").click()
         admin.get_by_role("button", name="通过", exact=True).first.click()

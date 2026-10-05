@@ -20,6 +20,7 @@ type Profile = { id: number; username: string; nickname: string; role: string; s
 type Report = { id: number; target_type: string; target_id: number; explanation: string; status: string; moderator_reason?: string; target?: Record<string, unknown> }
 
 const page = ref<'browse' | 'mine' | 'requests' | 'admin'>('browse')
+const accessToken = ref('')
 const profile = ref<Profile | null>(null)
 const posts = ref<Post[]>([])
 const mine = ref<Post[]>([])
@@ -48,12 +49,26 @@ const humanKind = (kind: Kind | string) => kind === 'lost' ? '寻物启事' : ki
 const lifecycle = (post: Post) => post.lifecycle_status
 const dateText = (value?: string) => value ? new Date(value).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }) : '时间待补充'
 
-async function api<T = any>(path: string, options: RequestInit = {}): Promise<T> {
+async function api<T = any>(path: string, options: RequestInit = {}, canRefresh = true): Promise<T> {
+  const headers = new Headers(options.headers)
+  if (options.body) headers.set('Content-Type', 'application/json')
+  if (accessToken.value && !path.endsWith('/auth/refresh')) headers.set('Authorization', `Bearer ${accessToken.value}`)
   const response = await fetch(`/api${path}`, {
     ...options,
     credentials: 'include',
-    headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers },
+    headers,
   })
+  if (response.status === 401 && canRefresh && path !== '/auth/refresh' && path !== '/auth/login' && path !== '/auth/register') {
+    try {
+      const refreshed = await fetch('/api/auth/refresh', { method: 'POST', credentials: 'include' })
+      if (refreshed.ok) {
+        accessToken.value = (await refreshed.json()).access_token
+        return api<T>(path, options, false)
+      }
+    } catch { /* The original request supplies the visible error below. */ }
+    accessToken.value = ''
+    profile.value = null
+  }
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}))
     throw new Error(typeof payload.detail === 'string' ? payload.detail : '请求未能完成，请检查填写内容。')
@@ -88,7 +103,12 @@ async function refresh() {
   } catch (caught) { error.value = (caught as Error).message }
 }
 async function refreshProfile() {
-  try { profile.value = await api<Profile>('/auth/me') } catch { profile.value = null }
+  try {
+    const response = await fetch('/api/auth/refresh', { method: 'POST', credentials: 'include' })
+    if (!response.ok) { profile.value = null; return }
+    accessToken.value = (await response.json()).access_token
+    profile.value = await api<Profile>('/auth/me')
+  } catch { accessToken.value = ''; profile.value = null }
 }
 watch(page, refresh)
 watch(() => [query.kind, query.status], () => { offset.value = 0; if (page.value === 'browse') loadPosts().catch((e) => error.value = e.message) })
@@ -100,11 +120,13 @@ async function accountSubmit() {
     const payload = accountMode.value === 'register'
       ? { username: form.username, password: form.password, nickname: form.nickname, student_number: form.student_number }
       : { username: form.username, password: form.password }
-    profile.value = await api('/auth/' + (accountMode.value === 'register' ? 'register' : 'login'), send('POST', payload))
+    const result = await api<{ access_token: string; user: Profile }>('/auth/' + (accountMode.value === 'register' ? 'register' : 'login'), send('POST', payload))
+    accessToken.value = result.access_token
+    profile.value = result.user
     accountOpen.value = false; notice.value = '欢迎回来，' + profile.value?.nickname; await refresh()
   } catch (caught) { error.value = (caught as Error).message } finally { busy.value = false }
 }
-async function signOut() { await api('/auth/logout', send('POST')); profile.value = null; selected.value = null; notice.value = '已安全退出'; page.value = 'browse'; await refresh() }
+async function signOut() { try { await api('/auth/logout', send('POST')) } finally { accessToken.value = ''; profile.value = null }; selected.value = null; notice.value = '已安全退出'; page.value = 'browse'; await refresh() }
 async function createPost() {
   try {
     await api('/posts', send('POST', { ...postForm, category: postForm.category || null, location: postForm.location || null, event_time: postForm.event_time || null }))
