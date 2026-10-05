@@ -49,6 +49,22 @@ const humanKind = (kind: Kind | string) => kind === 'lost' ? '寻物启事' : ki
 const lifecycle = (post: Post) => post.lifecycle_status
 const dateText = (value?: string) => value ? new Date(value).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }) : '时间待补充'
 
+let refreshPromise: Promise<string | null> | null = null
+async function refreshAccessToken(): Promise<string | null> {
+  if (!refreshPromise) {
+    refreshPromise = (async () => {
+      try {
+        const response = await fetch('/api/auth/refresh', { method: 'POST', credentials: 'include' })
+        if (!response.ok) return null
+        const payload = await response.json()
+        return typeof payload.access_token === 'string' ? payload.access_token : null
+      } catch { return null }
+      finally { refreshPromise = null }
+    })()
+  }
+  return refreshPromise
+}
+
 async function api<T = any>(path: string, options: RequestInit = {}, canRefresh = true): Promise<T> {
   const headers = new Headers(options.headers)
   if (options.body) headers.set('Content-Type', 'application/json')
@@ -59,13 +75,11 @@ async function api<T = any>(path: string, options: RequestInit = {}, canRefresh 
     headers,
   })
   if (response.status === 401 && canRefresh && path !== '/auth/refresh' && path !== '/auth/login' && path !== '/auth/register') {
-    try {
-      const refreshed = await fetch('/api/auth/refresh', { method: 'POST', credentials: 'include' })
-      if (refreshed.ok) {
-        accessToken.value = (await refreshed.json()).access_token
-        return api<T>(path, options, false)
-      }
-    } catch { /* The original request supplies the visible error below. */ }
+    const token = await refreshAccessToken()
+    if (token) {
+      accessToken.value = token
+      return api<T>(path, options, false)
+    }
     accessToken.value = ''
     profile.value = null
   }
@@ -104,9 +118,9 @@ async function refresh() {
 }
 async function refreshProfile() {
   try {
-    const response = await fetch('/api/auth/refresh', { method: 'POST', credentials: 'include' })
-    if (!response.ok) { profile.value = null; return }
-    accessToken.value = (await response.json()).access_token
+    const token = await refreshAccessToken()
+    if (!token) { accessToken.value = ''; profile.value = null; return }
+    accessToken.value = token
     profile.value = await api<Profile>('/auth/me')
   } catch { accessToken.value = ''; profile.value = null }
 }

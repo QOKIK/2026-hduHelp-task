@@ -420,8 +420,14 @@ func (s *server) refresh(c *gin.Context) {
 		return
 	}
 	if consumed != nil {
-		_, _ = tx.Exec(c, "UPDATE refresh_tokens SET revoked_at=now() WHERE family_id=$1 AND revoked_at IS NULL", family)
-		_ = tx.Commit(c)
+		if _, e = tx.Exec(c, "UPDATE refresh_tokens SET revoked_at=now() WHERE family_id=$1 AND revoked_at IS NULL", family); e != nil {
+			fail(c, 500, "刷新失败")
+			return
+		}
+		if e = tx.Commit(c); e != nil {
+			fail(c, 500, "刷新失败")
+			return
+		}
 		fail(c, 401, "检测到重复使用，当前设备已退出")
 		return
 	}
@@ -919,7 +925,15 @@ func (s *server) withdrawRequest(c *gin.Context) {
 		fail(c, 409, "只有待处理的请求可以撤回")
 		return
 	}
-	_, _ = s.db.Exec(c, "UPDATE requests SET status='已撤回' WHERE id=$1", id)
+	result, e := s.db.Exec(c, "UPDATE requests SET status='已撤回' WHERE id=$1 AND requester_id=$2 AND status='待处理' AND removed=false", id, current(c).ID)
+	if e != nil {
+		fail(c, 500, "撤回失败")
+		return
+	}
+	if result.RowsAffected() == 0 {
+		fail(c, 409, "此请求已处理")
+		return
+	}
 	c.JSON(200, gin.H{"ok": true})
 }
 func (s *server) acceptRequest(c *gin.Context) { s.resolveRequest(c, true) }
@@ -998,33 +1012,15 @@ func (s *server) resolveRequest(c *gin.Context, accept bool) {
 		fail(c, 500, "处理失败")
 		return
 	}
-	_ = tx.Commit(c)
+	if e = tx.Commit(c); e != nil {
+		fail(c, 500, "处理失败")
+		return
+	}
 	out, _ := s.getRequest(c, id)
 	c.JSON(200, out)
 }
 func (s *server) report(c *gin.Context, targetType string, targetID int64) {
 	u := current(c)
-	if targetType == "post" {
-		p, e := s.postByID(c, targetID, true)
-		if e != nil {
-			fail(c, 404, "内容不存在")
-			return
-		}
-		if p["author_id"] == u.ID {
-			fail(c, 422, "不能举报自己的内容")
-			return
-		}
-	} else {
-		r, e := s.getRequest(c, targetID)
-		if e != nil {
-			fail(c, 404, "请求不存在")
-			return
-		}
-		if u.ID != r.RequesterID && u.ID != r.AuthorID {
-			fail(c, 403, "只有请求参与者能举报私密请求")
-			return
-		}
-	}
 	var in struct {
 		Explanation string `json:"explanation"`
 	}
@@ -1035,9 +1031,45 @@ func (s *server) report(c *gin.Context, targetType string, targetID int64) {
 		fail(c, 422, "举报说明至少 5 字")
 		return
 	}
-	var id int64
-	e := s.db.QueryRow(c, "INSERT INTO reports(reporter_id,target_type,target_id,explanation) VALUES($1,$2,$3,$4) RETURNING id", u.ID, targetType, targetID, strings.TrimSpace(in.Explanation)).Scan(&id)
+	tx, e := s.db.Begin(c)
 	if e != nil {
+		fail(c, 500, "举报失败")
+		return
+	}
+	defer tx.Rollback(c)
+	if targetType == "post" {
+		var authorID int64
+		var moderation string
+		var withdrawn bool
+		e = tx.QueryRow(c, "SELECT author_id,moderation_status,withdrawn FROM posts WHERE id=$1 FOR UPDATE", targetID).Scan(&authorID, &moderation, &withdrawn)
+		if e != nil || moderation != "已通过" || withdrawn {
+			fail(c, 404, "内容不存在")
+			return
+		}
+		if authorID == u.ID {
+			fail(c, 422, "不能举报自己的内容")
+			return
+		}
+	} else {
+		var requesterID, authorID int64
+		var removed bool
+		e = tx.QueryRow(c, `SELECT q.requester_id,p.author_id,q.removed FROM requests q JOIN posts p ON p.id=q.post_id WHERE q.id=$1 FOR UPDATE OF q`, targetID).Scan(&requesterID, &authorID, &removed)
+		if e != nil || removed {
+			fail(c, 404, "请求不存在")
+			return
+		}
+		if u.ID != requesterID && u.ID != authorID {
+			fail(c, 403, "只有请求参与者能举报私密请求")
+			return
+		}
+	}
+	var id int64
+	e = tx.QueryRow(c, "INSERT INTO reports(reporter_id,target_type,target_id,explanation) VALUES($1,$2,$3,$4) RETURNING id", u.ID, targetType, targetID, strings.TrimSpace(in.Explanation)).Scan(&id)
+	if e != nil {
+		fail(c, 500, "举报失败")
+		return
+	}
+	if e = tx.Commit(c); e != nil {
 		fail(c, 500, "举报失败")
 		return
 	}
@@ -1267,6 +1299,9 @@ func (s *server) reportDecision(c *gin.Context, remove bool) {
 		fail(c, 500, "处理失败")
 		return
 	}
-	_ = tx.Commit(c)
+	if e = tx.Commit(c); e != nil {
+		fail(c, 500, "处理失败")
+		return
+	}
 	c.JSON(200, gin.H{"ok": true})
 }
