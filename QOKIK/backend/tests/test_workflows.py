@@ -60,7 +60,14 @@ def test_revision_keeps_approved_version_until_review_and_rejection_keeps_it(tmp
         public_after = author.get(f"/api/posts/{post['id']}").json()
         own_after = author.get("/api/my/posts").json()[0]
         assert public_after["item_name"] == "黑色耳机盒"
-        assert own_after["pending_revision"]["rejection_reason"] == "请移除个人联系方式后再发布"
+        assert own_after["pending_revision"] is None
+        assert own_after["latest_revision"]["rejection_reason"] == "请移除个人联系方式后再发布"
+        resubmitted = author.put(
+            f"/api/posts/{post['id']}",
+            json={"kind": "lost", "item_name": "黑色耳机盒（已修正）", "description": "黑色耳机盒，外壳有白色贴纸。"},
+        )
+        assert resubmitted.json()["pending_revision"]["item_name"] == "黑色耳机盒（已修正）"
+        assert author.get(f"/api/posts/{post['id']}").json()["item_name"] == "黑色耳机盒"
 
 
 def test_request_details_are_private_until_a_participant_reports_them(tmp_path):

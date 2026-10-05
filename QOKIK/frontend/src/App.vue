@@ -2,10 +2,15 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 type Kind = 'lost' | 'found'
+type Revision = {
+  item_name: string; description: string; category?: string | null; location?: string | null; event_time?: string | null
+  moderation_status: string; rejection_reason?: string | null
+}
 type Post = {
   id: number; kind: Kind; item_name: string; description: string; category?: string; location?: string
   event_time?: string; lifecycle_status: string; moderation_status: string; rejection_reason?: string
-  created_at: string; approved_at?: string; withdrawn?: boolean; author_nickname?: string; author_student_number?: string; pending_revision?: Record<string, unknown> | null
+  created_at: string; approved_at?: string; withdrawn?: boolean; author_nickname?: string; author_student_number?: string
+  pending_revision?: Revision | null; latest_revision?: Revision | null
 }
 type RequestItem = {
   id: number; post_id: number; kind: 'claim' | 'lead'; explanation: string; contact_method: string
@@ -152,7 +157,8 @@ async function takeDownSelected() {
   if (!error.value) { selected.value = null; page.value = 'browse'; await loadPosts() }
 }
 function editPost(post: Post) {
-  Object.assign(postForm, { kind: post.kind, item_name: post.item_name, description: post.description, category: post.category || '', location: post.location || '', event_time: post.event_time || '' })
+  const draft = post.pending_revision || (post.latest_revision?.moderation_status === '已驳回' ? post.latest_revision : post)
+  Object.assign(postForm, { kind: post.kind, item_name: draft.item_name, description: draft.description, category: draft.category || '', location: draft.location || '', event_time: draft.event_time || '' })
   selected.value = post; publishOpen.value = true
 }
 </script>
@@ -230,7 +236,7 @@ function editPost(post: Post) {
         </aside></div>
       </section>
 
-      <section v-if="page === 'mine' && !selected" class="workspace-section"><div class="section-head"><div><div class="eyebrow muted"><span class="eyebrow-line" /> 个人空间</div><h2>我的发布</h2></div><button class="primary-action compact" @click="publishOpen = true">发布新信息 <span>＋</span></button></div><div v-if="mine.length" class="own-list"><article v-for="post in mine" :key="post.id" class="own-row"><div class="own-type" :class="post.kind">{{ post.kind === 'lost' ? '寻物' : '拾获' }}</div><div class="own-info"><button class="own-title" @click="openPost(post)">{{ post.item_name }}</button><p>{{ post.description }}</p><small>{{ dateText(post.created_at) }} · {{ post.location || '地点待补充' }}</small></div><div class="own-state"><span class="status-chip" :class="post.withdrawn ? 'rejected' : post.moderation_status === '已驳回' ? 'rejected' : ''">{{ post.withdrawn ? '已撤下' : post.moderation_status }}</span><small v-if="post.moderation_status === '已驳回'">{{ post.rejection_reason }}</small><small v-if="post.pending_revision">修改审核中，公开版本暂保持不变</small></div><button class="arrow-round" @click="openPost(post)">↗</button></article></div><div v-else class="empty-state"><span class="empty-orbit">＋</span><h3>还没有发布内容</h3><p>发布寻物启事或拾获公告，让校园里的善意流动起来。</p><button @click="publishOpen = true">发布第一条</button></div><div class="identity-note"><span>ⓘ</span> 学号只用于本地账号标识，当前未接入学校统一认证，其他用户看不到你的学号。</div></section>
+      <section v-if="page === 'mine' && !selected" class="workspace-section"><div class="section-head"><div><div class="eyebrow muted"><span class="eyebrow-line" /> 个人空间</div><h2>我的发布</h2></div><button class="primary-action compact" @click="publishOpen = true">发布新信息 <span>＋</span></button></div><div v-if="mine.length" class="own-list"><article v-for="post in mine" :key="post.id" class="own-row"><div class="own-type" :class="post.kind">{{ post.kind === 'lost' ? '寻物' : '拾获' }}</div><div class="own-info"><button class="own-title" @click="openPost(post)">{{ post.item_name }}</button><p>{{ post.description }}</p><small>{{ dateText(post.created_at) }} · {{ post.location || '地点待补充' }}</small></div><div class="own-state"><span class="status-chip" :class="post.withdrawn ? 'rejected' : post.moderation_status === '已驳回' ? 'rejected' : ''">{{ post.withdrawn ? '已撤下' : post.moderation_status }}</span><small v-if="post.moderation_status === '已驳回'">{{ post.rejection_reason }}</small><small v-if="post.pending_revision">修改审核中，公开版本暂保持不变</small><small v-if="post.latest_revision?.moderation_status === '已驳回'" class="reason-note">修改被驳回：{{ post.latest_revision.rejection_reason }}</small></div><button class="arrow-round" @click="openPost(post)">↗</button></article></div><div v-else class="empty-state"><span class="empty-orbit">＋</span><h3>还没有发布内容</h3><p>发布寻物启事或拾获公告，让校园里的善意流动起来。</p><button @click="publishOpen = true">发布第一条</button></div><div class="identity-note"><span>ⓘ</span> 学号只用于本地账号标识，当前未接入学校统一认证，其他用户看不到你的学号。</div></section>
 
       <section v-if="page === 'requests' && !selected" class="workspace-section"><div class="section-head"><div><div class="eyebrow muted"><span class="eyebrow-line" /> 跟进进展</div><h2>我的申请</h2></div></div><div v-if="requests.length" class="own-list"><article v-for="req in requests" :key="req.id" class="own-row"><div class="own-type" :class="req.kind">{{ req.kind === 'claim' ? '认领' : '线索' }}</div><div class="own-info"><b>{{ req.item_name }}</b><p>{{ req.explanation }}</p><small>我的联系方式：{{ req.contact_method }}</small><small v-if="req.resolution_reason" class="reason-note">{{ req.resolution_reason }}</small></div><div class="own-state"><span class="status-chip">{{ req.status }}</span><button v-if="req.status === '待处理'" class="small-quiet" @click="withdrawRequest(req.id)">撤回申请</button><button class="small-quiet" @click="reportTarget = { type: 'request', id: req.id }">举报此请求</button></div></article></div><div v-else class="empty-state"><span class="empty-orbit">↗</span><h3>申请记录会出现在这里</h3><p>找到相关物品后提交线索或认领，发布者的处理进度也会同步更新。</p><button @click="page = 'browse'">去信息广场</button></div></section>
 

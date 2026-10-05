@@ -279,7 +279,8 @@ def create_app(
             "author_nickname": row["author_nickname"] if "author_nickname" in row.keys() else None,
         }
         if author:
-            data["pending_revision"] = dict(revision) if revision else None
+            data["pending_revision"] = dict(revision) if revision and revision["moderation_status"] == "待审核" else None
+            data["latest_revision"] = dict(revision) if revision else None
         if "author_student_number" in row.keys():
             data["author_student_number"] = row["author_student_number"]
             data["author_student_number_verified"] = False
