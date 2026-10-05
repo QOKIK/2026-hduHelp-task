@@ -233,7 +233,7 @@ function editPost(post: Post) {
           <div class="floating-note note-b"><span>✳</span> 让善意抵达</div>
           <div class="hero-stamp">HDU<br /><small>HELP</small></div>
         </div>
-        <div class="hero-foot"><span>01 / 03</span><span>从一条线索开始，慢慢找回来</span><span class="hero-scroll">向下浏览 ↓</span></div>
+        <div class="hero-foot"><span class="hero-caption">从一条线索开始，慢慢找回来</span><span class="hero-scroll">向下浏览 ↓</span></div>
       </section>
 
       <section v-if="page === 'browse' && !selected" class="board-section">
