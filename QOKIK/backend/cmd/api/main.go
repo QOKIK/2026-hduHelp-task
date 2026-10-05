@@ -92,6 +92,17 @@ func env(k, fallback string) string {
 	}
 	return fallback
 }
+func allowedOrigin(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	for _, allowed := range strings.Split(env("ALLOWED_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:5174"), ",") {
+		if strings.TrimSpace(allowed) == origin {
+			return true
+		}
+	}
+	return false
+}
 func migrate(ctx context.Context, db *pgxpool.Pool) error {
 	_, err := db.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
 	if err != nil {
@@ -263,7 +274,7 @@ func (s *server) clearCookie(c *gin.Context) {
 	c.SetSameSite(http.SameSiteStrictMode)
 	c.SetCookie("hduhelp_refresh", "", -1, "/api/auth", "", s.cookieSecure, true)
 }
-func (s *server) issuePair(c *gin.Context, u user, family string) error {
+func (s *server) issuePair(c *gin.Context, u user, family string, status int) error {
 	access, _, e := s.sign(u, "access", "", 15*time.Minute)
 	if e != nil {
 		return e
@@ -291,7 +302,7 @@ func (s *server) issuePair(c *gin.Context, u user, family string) error {
 		return errors.New("refresh token family was revoked")
 	}
 	s.setRefreshCookie(c, refresh)
-	c.JSON(200, gin.H{"access_token": access, "token_type": "Bearer", "expires_in": 900, "user": profile(u)})
+	c.JSON(status, gin.H{"access_token": access, "token_type": "Bearer", "expires_in": 900, "user": profile(u)})
 	return nil
 }
 func profile(u user) gin.H {
@@ -355,7 +366,7 @@ func (s *server) register(c *gin.Context) {
 		return
 	}
 	c.Status(201)
-	if e = s.issuePair(c, u, ""); e != nil {
+	if e = s.issuePair(c, u, "", http.StatusCreated); e != nil {
 		fail(c, 500, "无法创建会话")
 	}
 }
@@ -374,13 +385,13 @@ func (s *server) login(c *gin.Context) {
 		fail(c, 401, "用户名或密码错误")
 		return
 	}
-	if e = s.issuePair(c, u, ""); e != nil {
+	if e = s.issuePair(c, u, "", http.StatusOK); e != nil {
 		fail(c, 500, "无法创建会话")
 	}
 }
 func (s *server) refresh(c *gin.Context) {
 	origin := c.GetHeader("Origin")
-	if origin != "" && origin != "http://127.0.0.1:5173" && origin != "http://localhost:5173" {
+	if !allowedOrigin(origin) {
 		fail(c, 403, "请求来源无效")
 		return
 	}
@@ -429,7 +440,7 @@ func (s *server) refresh(c *gin.Context) {
 		fail(c, 500, "刷新失败")
 		return
 	}
-	if e = s.issuePair(c, u, family); e != nil {
+	if e = s.issuePair(c, u, family, http.StatusOK); e != nil {
 		fail(c, 500, "刷新失败")
 	}
 }
@@ -618,30 +629,41 @@ func (s *server) updatePost(c *gin.Context) {
 		fail(c, 422, "内容格式无效")
 		return
 	}
-	p, e := s.postByID(c, id, false)
+	tx, e := s.db.Begin(c)
+	if e != nil {
+		fail(c, 500, "更新失败")
+		return
+	}
+	defer tx.Rollback(c)
+	var authorID int64
+	var kind, moderation string
+	e = tx.QueryRow(c, "SELECT author_id,kind,moderation_status FROM posts WHERE id=$1 FOR UPDATE", id).Scan(&authorID, &kind, &moderation)
 	if e != nil {
 		fail(c, 404, "内容不存在")
 		return
 	}
-	u := current(c)
-	if p["author_id"] != u.ID {
+	if authorID != current(c).ID {
 		fail(c, 403, "只能编辑自己的内容")
 		return
 	}
-	if p["kind"] != in.Kind {
+	if kind != in.Kind {
 		fail(c, 422, "不能更改内容类型")
 		return
 	}
-	if p["moderation_status"] == "已通过" {
-		_, e = s.db.Exec(c, `INSERT INTO revisions(post_id,item_name,description,category,location,event_time,moderation_status,rejection_reason,created_at) VALUES($1,$2,$3,$4,$5,$6,'待审核',NULL,now()) ON CONFLICT(post_id) DO UPDATE SET item_name=EXCLUDED.item_name,description=EXCLUDED.description,category=EXCLUDED.category,location=EXCLUDED.location,event_time=EXCLUDED.event_time,moderation_status='待审核',rejection_reason=NULL,created_at=now()`, id, strings.TrimSpace(in.Item), strings.TrimSpace(in.Description), in.Category, in.Location, in.EventTime)
+	if moderation == "已通过" {
+		_, e = tx.Exec(c, `INSERT INTO revisions(post_id,item_name,description,category,location,event_time,moderation_status,rejection_reason,created_at) VALUES($1,$2,$3,$4,$5,$6,'待审核',NULL,now()) ON CONFLICT(post_id) DO UPDATE SET item_name=EXCLUDED.item_name,description=EXCLUDED.description,category=EXCLUDED.category,location=EXCLUDED.location,event_time=EXCLUDED.event_time,moderation_status='待审核',rejection_reason=NULL,created_at=now()`, id, strings.TrimSpace(in.Item), strings.TrimSpace(in.Description), in.Category, in.Location, in.EventTime)
 	} else {
-		_, e = s.db.Exec(c, `UPDATE posts SET item_name=$2,description=$3,category=$4,location=$5,event_time=$6,moderation_status='待审核',rejection_reason=NULL WHERE id=$1`, id, strings.TrimSpace(in.Item), strings.TrimSpace(in.Description), in.Category, in.Location, in.EventTime)
+		_, e = tx.Exec(c, `UPDATE posts SET item_name=$2,description=$3,category=$4,location=$5,event_time=$6,moderation_status='待审核',rejection_reason=NULL WHERE id=$1`, id, strings.TrimSpace(in.Item), strings.TrimSpace(in.Description), in.Category, in.Location, in.EventTime)
 	}
 	if e != nil {
 		fail(c, 500, "更新失败")
 		return
 	}
-	p, _ = s.postByID(c, id, false)
+	if e = tx.Commit(c); e != nil {
+		fail(c, 500, "更新失败")
+		return
+	}
+	p, _ := s.postByID(c, id, false)
 	c.JSON(200, p)
 }
 func (s *server) setPostStatus(c *gin.Context) {
@@ -656,17 +678,23 @@ func (s *server) setPostStatus(c *gin.Context) {
 	if !bind(c, &in) {
 		return
 	}
-	p, e := s.postByID(c, id, false)
+	tx, e := s.db.Begin(c)
+	if e != nil {
+		fail(c, 500, "处理失败")
+		return
+	}
+	defer tx.Rollback(c)
+	var authorID int64
+	var kind, oldStatus string
+	e = tx.QueryRow(c, "SELECT author_id,kind,lifecycle_status FROM posts WHERE id=$1 FOR UPDATE", id).Scan(&authorID, &kind, &oldStatus)
 	if e != nil {
 		fail(c, 404, "内容不存在")
 		return
 	}
-	u := current(c)
-	if p["author_id"] != u.ID {
+	if authorID != current(c).ID {
 		fail(c, 403, "只能更新自己的内容")
 		return
 	}
-	kind := p["kind"].(string)
 	valid := []string{"已结束"}
 	active, resolved := "寻找中", "已找回"
 	if kind == "found" {
@@ -677,15 +705,21 @@ func (s *server) setPostStatus(c *gin.Context) {
 		fail(c, 422, "无效的内容状态")
 		return
 	}
-	if p["lifecycle_status"] != active && in.Status == active {
+	if oldStatus != active && in.Status == active {
 		fail(c, 409, "已解决或结束的内容不能重新开放")
 		return
 	}
-	_, _ = s.db.Exec(c, "UPDATE posts SET lifecycle_status=$2 WHERE id=$1", id, in.Status)
+	_, e = tx.Exec(c, "UPDATE posts SET lifecycle_status=$2 WHERE id=$1", id, in.Status)
 	if in.Status == resolved || in.Status == "已结束" {
-		_, _ = s.db.Exec(c, "UPDATE requests SET status='已拒绝',resolution_reason=$2 WHERE post_id=$1 AND status='待处理'", id, "关联内容已更新为「"+in.Status+"」")
+		if e == nil {
+			_, e = tx.Exec(c, "UPDATE requests SET status='已拒绝',resolution_reason=$2 WHERE post_id=$1 AND status='待处理'", id, "关联内容已更新为「"+in.Status+"」")
+		}
 	}
-	p, _ = s.postByID(c, id, false)
+	if e != nil || tx.Commit(c) != nil {
+		fail(c, 500, "处理失败")
+		return
+	}
+	p, _ := s.postByID(c, id, false)
 	c.JSON(200, p)
 }
 func contains(a []string, v string) bool {
@@ -697,23 +731,39 @@ func contains(a []string, v string) bool {
 	return false
 }
 func (s *server) deletePost(c *gin.Context) {
-	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	p, e := s.postByID(c, id, false)
+	id, e := strconv.ParseInt(c.Param("id"), 10, 64)
 	if e != nil {
 		fail(c, 404, "内容不存在")
 		return
 	}
-	u := current(c)
-	if p["author_id"] != u.ID {
+	tx, e := s.db.Begin(c)
+	if e != nil {
+		fail(c, 500, "删除失败")
+		return
+	}
+	defer tx.Rollback(c)
+	var authorID int64
+	if e = tx.QueryRow(c, "SELECT author_id FROM posts WHERE id=$1 FOR UPDATE", id).Scan(&authorID); e != nil {
+		fail(c, 404, "内容不存在")
+		return
+	}
+	if authorID != current(c).ID {
 		fail(c, 403, "只能删除自己的内容")
 		return
 	}
 	var count int
-	_ = s.db.QueryRow(c, "SELECT (SELECT count(*) FROM requests WHERE post_id=$1)+(SELECT count(*) FROM reports WHERE target_type='post' AND target_id=$1)", id).Scan(&count)
+	if e = tx.QueryRow(c, "SELECT (SELECT count(*) FROM requests WHERE post_id=$1)+(SELECT count(*) FROM reports WHERE target_type='post' AND target_id=$1)", id).Scan(&count); e != nil {
+		fail(c, 500, "删除失败")
+		return
+	}
 	if count > 0 {
-		_, _ = s.db.Exec(c, "UPDATE posts SET withdrawn=true WHERE id=$1", id)
+		_, e = tx.Exec(c, "UPDATE posts SET withdrawn=true WHERE id=$1", id)
 	} else {
-		_, _ = s.db.Exec(c, "DELETE FROM posts WHERE id=$1", id)
+		_, e = tx.Exec(c, "DELETE FROM posts WHERE id=$1", id)
+	}
+	if e != nil || tx.Commit(c) != nil {
+		fail(c, 500, "删除失败")
+		return
 	}
 	c.JSON(200, gin.H{"ok": true, "withdrawn": count > 0})
 }
@@ -745,21 +795,7 @@ func (s *server) getRequest(c *gin.Context, id int64) (requestRow, error) {
 }
 func (s *server) createRequest(c *gin.Context) {
 	postID, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	p, e := s.postByID(c, postID, true)
-	if e != nil {
-		fail(c, 404, "内容不存在")
-		return
-	}
 	u := current(c)
-	if p["author_id"] == u.ID {
-		fail(c, 422, "不能对自己的内容提交请求")
-		return
-	}
-	status := p["lifecycle_status"].(string)
-	if status == "已找回" || status == "已归还" || status == "已结束" {
-		fail(c, 409, "该内容已结束处理")
-		return
-	}
 	var in struct {
 		Explanation string `json:"explanation"`
 		Contact     string `json:"contact_method"`
@@ -771,13 +807,39 @@ func (s *server) createRequest(c *gin.Context) {
 		fail(c, 422, "请求信息格式无效")
 		return
 	}
-	kind := "lead"
-	if p["kind"] == "found" {
-		kind = "claim"
+	tx, e := s.db.Begin(c)
+	if e != nil {
+		fail(c, 500, "提交失败")
+		return
+	}
+	defer tx.Rollback(c)
+	var authorID int64
+	var kind, lifecycle, moderation string
+	var withdrawn bool
+	e = tx.QueryRow(c, "SELECT author_id,kind,lifecycle_status,moderation_status,withdrawn FROM posts WHERE id=$1 FOR UPDATE", postID).Scan(&authorID, &kind, &lifecycle, &moderation, &withdrawn)
+	if e != nil || moderation != "已通过" || withdrawn {
+		fail(c, 404, "内容不存在")
+		return
+	}
+	if authorID == u.ID {
+		fail(c, 422, "不能对自己的内容提交请求")
+		return
+	}
+	if lifecycle == "已找回" || lifecycle == "已归还" || lifecycle == "已结束" {
+		fail(c, 409, "该内容已结束处理")
+		return
+	}
+	requestKind := "lead"
+	if kind == "found" {
+		requestKind = "claim"
 	}
 	var id int64
-	e = s.db.QueryRow(c, "INSERT INTO requests(post_id,requester_id,kind,explanation,contact_method) VALUES($1,$2,$3,$4,$5) RETURNING id", postID, u.ID, kind, strings.TrimSpace(in.Explanation), strings.TrimSpace(in.Contact)).Scan(&id)
+	e = tx.QueryRow(c, "INSERT INTO requests(post_id,requester_id,kind,explanation,contact_method) VALUES($1,$2,$3,$4,$5) RETURNING id", postID, u.ID, requestKind, strings.TrimSpace(in.Explanation), strings.TrimSpace(in.Contact)).Scan(&id)
 	if e != nil {
+		fail(c, 500, "提交失败")
+		return
+	}
+	if e = tx.Commit(c); e != nil {
 		fail(c, 500, "提交失败")
 		return
 	}
@@ -1028,11 +1090,6 @@ func (s *server) approvePost(c *gin.Context) { s.review(c, true) }
 func (s *server) rejectPost(c *gin.Context)  { s.review(c, false) }
 func (s *server) review(c *gin.Context, approve bool) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	p, e := s.postByID(c, id, false)
-	if e != nil {
-		fail(c, 404, "内容不存在")
-		return
-	}
 	reason := ""
 	if !approve {
 		var in struct {
@@ -1047,19 +1104,28 @@ func (s *server) review(c *gin.Context, approve bool) {
 		}
 		reason = in.Reason
 	}
-	var rev postInput
-	e = s.db.QueryRow(c, "SELECT item_name,description,category,location,event_time FROM revisions WHERE post_id=$1 AND moderation_status='待审核'", id).Scan(&rev.Item, &rev.Description, &rev.Category, &rev.Location, &rev.EventTime)
-	hasRev := e == nil
-	if !hasRev && p["moderation_status"] != "待审核" {
-		fail(c, 409, "没有待审核的内容")
-		return
-	}
 	tx, e := s.db.Begin(c)
 	if e != nil {
 		fail(c, 500, "处理失败")
 		return
 	}
 	defer tx.Rollback(c)
+	var moderation string
+	if e = tx.QueryRow(c, "SELECT moderation_status FROM posts WHERE id=$1 FOR UPDATE", id).Scan(&moderation); e != nil {
+		fail(c, 404, "内容不存在")
+		return
+	}
+	var rev postInput
+	e = tx.QueryRow(c, "SELECT item_name,description,category,location,event_time FROM revisions WHERE post_id=$1 AND moderation_status='待审核' FOR UPDATE", id).Scan(&rev.Item, &rev.Description, &rev.Category, &rev.Location, &rev.EventTime)
+	hasRev := e == nil
+	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
+		fail(c, 500, "读取审核内容失败")
+		return
+	}
+	if !hasRev && moderation != "待审核" {
+		fail(c, 409, "没有待审核的内容")
+		return
+	}
 	if hasRev && approve {
 		_, e = tx.Exec(c, `UPDATE posts SET item_name=$2,description=$3,category=$4,location=$5,event_time=$6,approved_at=now() WHERE id=$1`, id, rev.Item, rev.Description, rev.Category, rev.Location, rev.EventTime)
 		if e == nil {
@@ -1083,9 +1149,12 @@ func (s *server) review(c *gin.Context, approve bool) {
 		fail(c, 500, "处理失败")
 		return
 	}
-	_ = tx.Commit(c)
+	if e = tx.Commit(c); e != nil {
+		fail(c, 500, "处理失败")
+		return
+	}
 	if approve {
-		p, _ = s.postByID(c, id, false)
+		p, _ := s.postByID(c, id, false)
 		c.JSON(200, p)
 	} else {
 		c.JSON(200, gin.H{"ok": true})
@@ -1103,7 +1172,12 @@ func (s *server) takeDown(c *gin.Context) {
 		fail(c, 422, "处理原因至少 3 字")
 		return
 	}
-	if _, e := s.db.Exec(c, "UPDATE posts SET withdrawn=true WHERE id=$1", id); e != nil {
+	result, e := s.db.Exec(c, "UPDATE posts SET withdrawn=true WHERE id=$1", id)
+	if e != nil {
+		fail(c, 404, "内容不存在")
+		return
+	}
+	if result.RowsAffected() == 0 {
 		fail(c, 404, "内容不存在")
 		return
 	}

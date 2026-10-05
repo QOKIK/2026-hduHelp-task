@@ -42,4 +42,23 @@ func TestJWTRequiresExpectedUseIssuerAudienceAndAlgorithm(t *testing.T) {
 	if _, err = wrongIssuer.parse(access, "access"); err == nil {
 		t.Fatal("JWT with the wrong issuer was accepted")
 	}
+	expired, _, err := s.sign(u, "access", "", -time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.parse(expired, "access"); err == nil {
+		t.Fatal("expired JWT was accepted")
+	}
+}
+
+func TestRefreshOriginMustBePresentAndAllowlisted(t *testing.T) {
+	if allowedOrigin("") {
+		t.Fatal("missing Origin must not be accepted")
+	}
+	if !allowedOrigin("http://127.0.0.1:5174") {
+		t.Fatal("the configured E2E origin was rejected")
+	}
+	if allowedOrigin("https://untrusted.example") {
+		t.Fatal("untrusted Origin was accepted")
+	}
 }

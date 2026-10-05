@@ -71,6 +71,9 @@ func TestPostgresAPIAuthAndModeration(t *testing.T) {
 		}
 		req := httptest.NewRequest(method, path, &body)
 		req.Header.Set("Content-Type", "application/json")
+		if path == "/api/auth/refresh" {
+			req.Header.Set("Origin", "http://127.0.0.1:5173")
+		}
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
@@ -179,8 +182,20 @@ func TestPostgresAPIAuthAndModeration(t *testing.T) {
 		}
 		return result.Access
 	}
+	logoutRegistration := request(http.MethodPost, "/api/auth/register", map[string]any{"username": "logout-user", "password": "long-test-password", "nickname": "logout-user", "student_number": "23010004"}, "", nil)
+	logoutCookies := logoutRegistration.Result().Cookies()
+	if logoutRegistration.Code != http.StatusCreated || len(logoutCookies) == 0 {
+		t.Fatalf("prepare logout test failed: %d", logoutRegistration.Code)
+	}
+	if logout := request(http.MethodPost, "/api/auth/logout", nil, "", logoutCookies[0]); logout.Code != http.StatusOK {
+		t.Fatalf("logout status=%d", logout.Code)
+	}
+	if afterLogout := request(http.MethodPost, "/api/auth/refresh", nil, "", logoutCookies[0]); afterLogout.Code != http.StatusUnauthorized {
+		t.Fatalf("logout did not revoke refresh token family: %d", afterLogout.Code)
+	}
 	owner2 := registerUser("owner2", "23010002")
 	stranger := registerUser("stranger", "23010003")
+	outsider := registerUser("outsider", "23010005")
 	found := request(http.MethodPost, "/api/posts", map[string]any{"kind": "found", "item_name": "拾获的水壶", "description": "绿色水壶，底部贴有姓名标签。"}, pair.Access, nil)
 	if found.Code != http.StatusCreated {
 		t.Fatalf("create found notice status=%d", found.Code)
@@ -202,7 +217,7 @@ func TestPostgresAPIAuthAndModeration(t *testing.T) {
 	}
 	_ = json.Unmarshal(claim1.Body.Bytes(), &firstClaim)
 	_ = json.Unmarshal(claim2.Body.Bytes(), &secondClaim)
-	if denied := request(http.MethodGet, "/api/requests/"+jsonNumber(firstClaim.ID), nil, pair.Access, nil); denied.Code != http.StatusForbidden {
+	if denied := request(http.MethodGet, "/api/requests/"+jsonNumber(firstClaim.ID), nil, outsider, nil); denied.Code != http.StatusForbidden {
 		t.Fatalf("private request leaked to stranger, status=%d", denied.Code)
 	}
 	if unopened := request(http.MethodGet, "/api/admin/reports", nil, adminPair.Access, nil); strings.Contains(unopened.Body.String(), "first@example.test") {

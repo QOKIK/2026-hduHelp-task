@@ -13,9 +13,9 @@
 1. 浏览器端走通主要用户流程，覆盖注册/登录、发布与审核、检索、线索/认领、举报及管理后台。
 2. 在 API 边界验证访问权限、隐私隔离和关键状态转换，并通过隔离的测试数据库观察持久化后的外部行为。
 
-## Go 后端重构（代码已实现，集成验收待运行）
+## Go 后端重构（本地验收通过）
 
-Go/Gin API、PostgreSQL 迁移、Compose 配置和 Vue JWT 认证适配已落入工作树。现有 SQLite 数据不迁移，PostgreSQL 从空库初始化，普通用户需要重新注册。业务能力、权限和隐私边界沿用本规格。
+Go/Gin API、PostgreSQL 迁移、Compose 配置和 Vue JWT 认证适配已实现。现有 SQLite 数据不迁移，PostgreSQL 从空库初始化，普通用户需要重新注册。业务能力、权限和隐私边界沿用本规格。
 
 本地使用 Docker Compose 启动 Go API 和 PostgreSQL；Vue 开发服务器继续在宿主机通过 `npm run dev` 启动。当前阶段只要求本地可运行，不包含公网部署。
 
@@ -25,13 +25,13 @@ Go/Gin API、PostgreSQL 迁移、Compose 配置和 Vue JWT 认证适配已落入
 2. 按现有业务规格重建账户、认证、失物/拾获、审核、线索/认领、举报和管理功能。
 3. 更新 Vue API 客户端与界面认证流程，Access JWT 内存态须在页面刷新后通过 Refresh JWT 恢复。
 4. 使用隔离 PostgreSQL 数据库运行 API 集成测试，并通过浏览器走通验收流程。
-5. 在 Compose/PostgreSQL 与浏览器验收通过后，移除旧 FastAPI 后端及其专属依赖；迁移期间不让两个后端共同写同一数据。当前 Docker Engine 未运行，旧后端暂时保留，避免在验收前丢失回退路径。
+5. Compose/PostgreSQL 与浏览器验收通过后，移除旧 FastAPI 后端及其专属依赖；迁移期间不让两个后端共同写同一数据。此步骤已完成。
 
 ### 迁移完成条件
 
-- Docker Compose 能启动 Go API 和 PostgreSQL；按 README 启动 Vue 后，访客和登录用户主要流程可在浏览器完成。
-- API 测试提供隔离 PostgreSQL schema 验收入口，目前覆盖注册、JWT 刷新令牌重放撤销、权限和审核公开流程；其余隐私、生命周期、请求与举报场景仍需扩充并实际运行。
-- 浏览器 E2E 脚本已保留；需在 Docker Engine 可用后接入新 API 并实际走通访客搜索、注册登录、发布审核、认领与线索、举报及管理员处理。
+- Docker Compose 已启动 Go API 和 PostgreSQL；访客和登录用户主要流程已在浏览器走通。
+- API 集成测试在隔离 PostgreSQL schema 上通过，覆盖注册、Access JWT 校验、刷新轮换/重放撤销、登出、权限、旧版内容保留、私密请求边界、认领处理、举报和撤下保留。
+- 浏览器 E2E 已通过，覆盖注册登录、发布审核、页面刷新恢复认证、认领与线索、举报及管理员处理。
 - README 提供从空 PostgreSQL 开始的本地运行说明；真实密钥不写入仓库。
 
 ## User Stories
@@ -119,7 +119,7 @@ Go/Gin API、PostgreSQL 迁移、Compose 配置和 Vue JWT 认证适配已落入
 - Verify that public responses never expose student numbers or private request/contact fields, including to another logged-in user; verify that administrators cannot read private request content absent a participant report.
 - Verify pagination, filters, keyword behavior, newest-first order, moderation visibility, and old-approved-version visibility while a revision is pending.
 - Keep the test seam at externally visible API and browser behavior; adapt the existing Python MVP coverage rather than carrying over its framework-specific internals.
-- The previous Python implementation's behavior checks remain under `QOKIK/backend/tests/` and `QOKIK/frontend/e2e/` during transition. Port and run the full behavior-level coverage against the Go API and isolated PostgreSQL test database before removing the legacy backend.
+- The previous Python API tests were replaced by Go unit and PostgreSQL integration tests. The browser journey remains in `QOKIK/frontend/e2e/` and targets the Go API.
 
 ## Out of Scope
 
@@ -134,4 +134,4 @@ Go/Gin API、PostgreSQL 迁移、Compose 配置和 Vue JWT 认证适配已落入
 
 - The official assignment repository README requires the submitter's GitHub-username-named directory in the fork and a pull request for submission. Preserve that structure in the eventual implementation.
 - The assignment does not require a publicly deployed website or ICP filing. If public access on a mainland-hosted service is later chosen, handle provider and filing requirements before opening public service.
-- The target implementation in `QOKIK/` is Vue 3 with a Go/Gin API and PostgreSQL. Docker-backed integration and browser acceptance are still pending local Docker Engine availability; public deployment and production operations remain out of scope.
+- The implementation in `QOKIK/` is Vue 3 with a Go/Gin API and PostgreSQL. Local Docker-backed integration and browser acceptance passed; public deployment and production operations remain out of scope.

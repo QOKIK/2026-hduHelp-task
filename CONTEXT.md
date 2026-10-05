@@ -40,4 +40,4 @@ The post author may directly change a lost report to `已找回` or a found noti
 
 ## Current implementation
 
-The target stack is Vue 3/TypeScript/Vite with a Go/Gin API and PostgreSQL. The API uses local accounts, Argon2id password hashes, short-lived in-memory access JWTs, and rotating refresh JWTs in HttpOnly cookies. Docker Compose starts the API and database; Vite runs on the host. SQLite data is not migrated. The Go API, Compose setup, migrations, and frontend token flow are implemented, but PostgreSQL-backed integration and browser acceptance still need a running Docker Engine. Keep the legacy FastAPI implementation until those acceptance checks pass.
+The stack is Vue 3/TypeScript/Vite with a Go/Gin API and PostgreSQL. The API uses local accounts, Argon2id password hashes, short-lived in-memory access JWTs, and rotating refresh JWTs in HttpOnly cookies. Docker Compose starts the API and database; Vite runs on the host. SQLite data is not migrated or read. PostgreSQL-backed API integration and the browser journey passed locally; the legacy FastAPI implementation and dependencies were removed after those acceptance checks.
