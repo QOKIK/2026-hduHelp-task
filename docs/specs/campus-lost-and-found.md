@@ -93,7 +93,7 @@
 - Verify that public responses never expose student numbers or private request/contact fields, including to another logged-in user; verify that administrators cannot read private request content absent a participant report.
 - Verify pagination, filters, keyword behavior, newest-first order, moderation visibility, and old-approved-version visibility while a revision is pending.
 - Repository inspection found no application code or existing tests, so there is no prior test style to follow. Establish the lightest test harness that can exercise these user-visible seams when implementation is authorized.
-- No tests are being created or run as part of this requirements-planning phase.
+- The implementation phase now includes isolated API integration tests and a browser flow script at `QOKIK/backend/tests/` and `QOKIK/frontend/e2e/`.
 
 ## Out of Scope
 
@@ -108,4 +108,4 @@
 
 - The official assignment repository README requires the submitter's GitHub-username-named directory in the fork and a pull request for submission. Preserve that structure in the eventual implementation.
 - The assignment does not require a publicly deployed website or ICP filing. If public access on a mainland-hosted service is later chosen, handle provider and filing requirements before opening public service.
-- Project workspace currently contains only setup/domain documentation; implementation has not started.
+- The local implementation lives in `QOKIK/` and uses Vue 3, FastAPI, and SQLite. It is intended to run locally; public deployment and production operations remain out of scope.
