@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch, type Directive } from 'vue'
 
 type Kind = 'lost' | 'found'
 type Revision = {
@@ -23,6 +23,9 @@ const page = ref<'browse' | 'mine' | 'requests' | 'admin'>('browse')
 const accessToken = ref('')
 const profile = ref<Profile | null>(null)
 const posts = ref<Post[]>([])
+const isPostsLoading = ref(true)
+const hasLoadedPosts = ref(false)
+const postsLoadFailed = ref(false)
 const mine = ref<Post[]>([])
 const requests = ref<RequestItem[]>([])
 const selected = ref<Post | null>(null)
@@ -43,11 +46,43 @@ const postForm = reactive({ kind: 'lost' as Kind, item_name: '', description: ''
 const requestForm = reactive({ explanation: '', contact_method: '' })
 const reason = ref('')
 const reportTarget = ref<{ type: 'post' | 'request'; id: number } | null>(null)
+const heroIntroEnabled = ref(true)
+const isPostsUpdating = computed(() => isPostsLoading.value && hasLoadedPosts.value)
+
+type RevealOptions = { key?: string | number; delay?: number }
+const revealedMotionKeys = new Set<string>()
+let revealObserver: IntersectionObserver | null = null
+const vRevealOnce: Directive<HTMLElement, RevealOptions | undefined> = {
+  mounted(element, binding) {
+    const key = binding.value?.key === undefined ? undefined : String(binding.value.key)
+    element.classList.add('motion-reveal')
+    if (key) element.dataset.revealKey = key
+    if (binding.value?.delay) element.style.setProperty('--motion-delay', `${binding.value.delay}ms`)
+    if ((key && revealedMotionKeys.has(key)) || typeof IntersectionObserver === 'undefined') {
+      element.classList.add('motion-revealed')
+      return
+    }
+    revealObserver ??= new IntersectionObserver((entries, observer) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue
+        const revealedKey = (entry.target as HTMLElement).dataset.revealKey
+        if (revealedKey) revealedMotionKeys.add(revealedKey)
+        entry.target.classList.add('motion-revealed')
+        observer.unobserve(entry.target)
+      }
+    }, { threshold: 0.12, rootMargin: '0px 0px -24px 0px' })
+    revealObserver.observe(element)
+  },
+  unmounted(element) {
+    revealObserver?.unobserve(element)
+  },
+}
 
 const isAdmin = computed(() => profile.value?.role === 'admin')
 const humanKind = (kind: Kind | string) => kind === 'lost' ? '寻物启事' : kind === 'found' ? '拾获公告' : kind === 'claim' ? '认领申请' : '线索'
 const lifecycle = (post: Post) => post.lifecycle_status
 const dateText = (value?: string) => value ? new Date(value).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }) : '时间待补充'
+let postsRequestId = 0
 
 let refreshPromise: Promise<string | null> | null = null
 async function refreshAccessToken(): Promise<string | null> {
@@ -92,14 +127,40 @@ async function api<T = any>(path: string, options: RequestInit = {}, canRefresh 
 const send = (method: string, body?: unknown): RequestInit => ({ method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
 
 async function loadPosts() {
+  const requestId = ++postsRequestId
   const params = new URLSearchParams({ limit: '12', offset: String(offset.value) })
   if (query.q.trim()) params.set('q', query.q.trim())
   if (query.kind) params.set('kind', query.kind)
   if (query.status) params.set('status', query.status)
   if (query.location.trim()) params.set('location', query.location.trim())
-  const result = await api<{ items: Post[]; total: number }>(`/posts?${params}`)
-  posts.value = result.items; total.value = result.total
+  isPostsLoading.value = true
+  postsLoadFailed.value = false
+  try {
+    const result = await api<{ items: Post[]; total: number }>(`/posts?${params}`)
+    if (requestId !== postsRequestId) return
+    posts.value = result.items
+    total.value = result.total
+    hasLoadedPosts.value = true
+  } catch (caught) {
+    if (requestId !== postsRequestId) return
+    if (!hasLoadedPosts.value) postsLoadFailed.value = true
+    throw caught
+  } finally {
+    if (requestId === postsRequestId) isPostsLoading.value = false
+  }
 }
+function refreshPosts() {
+  loadPosts().catch((caught) => { error.value = (caught as Error).message })
+}
+function searchPosts() { offset.value = 0; refreshPosts() }
+function clearFilters() {
+  const filterWatcherWillReload = Boolean(query.kind || query.status)
+  query.q = ''; query.kind = ''; query.status = ''; query.location = ''
+  offset.value = 0
+  if (!filterWatcherWillReload) refreshPosts()
+}
+function previousPostsPage() { offset.value = Math.max(0, offset.value - 12); refreshPosts() }
+function nextPostsPage() { offset.value += 12; refreshPosts() }
 async function loadMine() { mine.value = await api<Post[]>('/my/posts') }
 async function loadRequests() { requests.value = await api<RequestItem[]>('/my/requests') }
 async function loadAdmin() {
@@ -125,7 +186,10 @@ async function refreshProfile() {
   } catch { accessToken.value = ''; profile.value = null }
 }
 watch(page, refresh)
-watch(() => [query.kind, query.status], () => { offset.value = 0; if (page.value === 'browse') loadPosts().catch((e) => error.value = e.message) })
+watch([page, selected], ([nextPage, nextSelected]) => {
+  if (nextPage !== 'browse' || nextSelected) heroIntroEnabled.value = false
+})
+watch(() => [query.kind, query.status], () => { offset.value = 0; if (page.value === 'browse') refreshPosts() })
 onMounted(async () => { await refreshProfile(); await refresh() })
 
 async function accountSubmit() {
@@ -218,7 +282,7 @@ function editPost(post: Post) {
     </header>
 
     <main>
-      <section v-if="page === 'browse' && !selected" class="hero">
+      <section v-if="page === 'browse' && !selected" class="hero" :class="{ 'hero--intro': heroIntroEnabled }">
         <div class="hero-copy">
           <div class="eyebrow"><span class="eyebrow-line" /> 杭州电子科技大学 · 校园互助</div>
           <h1>让每件遗失物<br /><em>都能回家。</em></h1>
@@ -237,25 +301,32 @@ function editPost(post: Post) {
       </section>
 
       <section v-if="page === 'browse' && !selected" class="board-section">
-        <div class="section-head"><div><div class="eyebrow muted"><span class="eyebrow-line" /> 信息板 · {{ total }} 条公开信息</div><h2>最近的校园线索</h2></div><button class="text-link" @click="loadPosts">更新列表 <span>↻</span></button></div>
-        <div class="filter-bar">
-          <label class="search-field"><span>⌕</span><input v-model="query.q" placeholder="搜索物品名称或描述" @keydown.enter="offset = 0; loadPosts()" /><button v-if="query.q" aria-label="清除搜索" @click="query.q = ''; loadPosts()">×</button></label>
+        <div class="section-head" v-reveal-once="{ key: 'board-heading' }"><div><div class="eyebrow muted"><span class="eyebrow-line" /> 信息板 · {{ total }} 条公开信息</div><h2>最近的校园线索</h2></div><div class="list-actions"><span v-if="isPostsUpdating" class="update-status" role="status" aria-live="polite">正在更新</span><button class="text-link" :disabled="isPostsUpdating" @click="refreshPosts">更新列表 <span>↻</span></button></div></div>
+        <div class="filter-bar" v-reveal-once="{ key: 'board-filters', delay: 70 }">
+          <label class="search-field"><span>⌕</span><input v-model="query.q" placeholder="搜索物品名称或描述" @keydown.enter="searchPosts" /><button v-if="query.q" aria-label="清除搜索" @click="query.q = ''; searchPosts()">×</button></label>
           <select v-model="query.kind" aria-label="内容类型"><option value="">全部信息</option><option value="lost">寻物启事</option><option value="found">拾获公告</option></select>
           <select v-model="query.status" aria-label="处理状态"><option value="">所有状态</option><option>寻找中</option><option>待认领</option><option>已找回</option><option>已归还</option><option>已结束</option></select>
-          <input v-model="query.location" class="location-filter" placeholder="地点" @keydown.enter="offset = 0; loadPosts()" />
-          <button class="filter-go" @click="offset = 0; loadPosts()">查找 <span>→</span></button>
+          <input v-model="query.location" class="location-filter" placeholder="地点" @keydown.enter="searchPosts" />
+          <button class="filter-go" @click="searchPosts">查找 <span>→</span></button>
         </div>
-        <div v-if="posts.length" class="post-grid">
-          <button v-for="(post, index) in posts" :key="post.id" class="post-card" :class="['tone-' + (index % 4)]" @click="openPost(post)">
-            <div class="card-top"><span class="kind-label" :class="post.kind">{{ humanKind(post.kind) }}</span><span class="card-date">{{ dateText(post.approved_at || post.created_at) }}</span></div>
-            <div class="item-illustration" :class="'illustration-' + (index % 4)"><span>{{ ['✳', '◌', '⌑', '✦'][index % 4] }}</span><i>{{ post.category || '校园物件' }}</i></div>
-            <h3>{{ post.item_name }}</h3><p>{{ post.description }}</p>
-            <div class="card-meta"><span>⌖ {{ post.location || '地点待补充' }}</span><span class="status-chip">{{ lifecycle(post) }}</span></div>
-            <div class="card-bottom"><span>{{ post.author_nickname || '校园同学' }} 发布</span><span class="arrow-round">↗</span></div>
-          </button>
+        <div class="board-results" :aria-busy="isPostsLoading">
+          <p v-if="isPostsLoading && !hasLoadedPosts" class="sr-only" role="status">正在加载公开信息</p>
+          <div v-if="isPostsLoading && !hasLoadedPosts" class="post-grid skeleton-grid" aria-hidden="true">
+            <div v-for="slot in 4" :key="slot" class="post-card post-skeleton"><div class="skeleton-top"><i /><i /></div><div class="skeleton-visual" /><i class="skeleton-title" /><i class="skeleton-line" /><div class="skeleton-bottom"><i /><i /></div></div>
+          </div>
+          <div v-else-if="postsLoadFailed && !hasLoadedPosts" class="empty-state load-error" role="alert"><span class="empty-orbit">!</span><h3>线索暂时加载失败</h3><p>请检查网络后重试。加载失败不会被当作没有搜索结果。</p><button @click="refreshPosts">重试</button></div>
+          <div v-else-if="posts.length" class="post-grid">
+            <button v-for="(post, index) in posts" :key="post.id" v-reveal-once="{ key: post.id, delay: Math.min(index * 40, 360) }" class="post-card" :class="['tone-' + (index % 4)]" @click="openPost(post)">
+              <div class="card-top"><span class="kind-label" :class="post.kind">{{ humanKind(post.kind) }}</span><span class="card-date">{{ dateText(post.approved_at || post.created_at) }}</span></div>
+              <div class="item-illustration" :class="'illustration-' + (index % 4)"><span>{{ ['✳', '◌', '⌑', '✦'][index % 4] }}</span><i>{{ post.category || '校园物件' }}</i></div>
+              <h3>{{ post.item_name }}</h3><p>{{ post.description }}</p>
+              <div class="card-meta"><span>⌖ {{ post.location || '地点待补充' }}</span><span class="status-chip">{{ lifecycle(post) }}</span></div>
+              <div class="card-bottom"><span>{{ post.author_nickname || '校园同学' }} 发布</span><span class="arrow-round">↗</span></div>
+            </button>
+          </div>
+          <div v-else class="empty-state" v-reveal-once><span class="empty-orbit">⌕</span><h3>还没有找到相关线索</h3><p>换一个关键词，或者发一条寻物信息，让大家一起留意。</p><button @click="clearFilters">清除筛选</button></div>
+          <div v-if="hasLoadedPosts && total > 12" class="pagination"><button :disabled="offset === 0" @click="previousPostsPage">← 上一页</button><span>{{ offset + 1 }}–{{ Math.min(offset + 12, total) }} / {{ total }}</span><button :disabled="offset + 12 >= total" @click="nextPostsPage">下一页 →</button></div>
         </div>
-        <div v-else class="empty-state"><span class="empty-orbit">⌕</span><h3>还没有找到相关线索</h3><p>换一个关键词，或者发一条寻物信息，让大家一起留意。</p><button @click="query.q = ''; query.kind = ''; query.status = ''; query.location = ''; loadPosts()">清除筛选</button></div>
-        <div v-if="total > 12" class="pagination"><button :disabled="offset === 0" @click="offset = Math.max(0, offset - 12); loadPosts()">← 上一页</button><span>{{ offset + 1 }}–{{ Math.min(offset + 12, total) }} / {{ total }}</span><button :disabled="offset + 12 >= total" @click="offset += 12; loadPosts()">下一页 →</button></div>
       </section>
 
       <section v-if="selected" class="detail-section">
