@@ -316,7 +316,7 @@ function editPost(post: Post) {
           </div>
           <div v-else-if="postsLoadFailed && !hasLoadedPosts" class="empty-state load-error" role="alert"><span class="empty-orbit">!</span><h3>线索暂时加载失败</h3><p>请检查网络后重试。加载失败不会被当作没有搜索结果。</p><button @click="refreshPosts">重试</button></div>
           <div v-else-if="posts.length" class="post-grid">
-            <button v-for="(post, index) in posts" :key="post.id" v-reveal-once="{ key: post.id, delay: Math.min(index * 40, 360) }" class="post-card" :class="['tone-' + (index % 4)]" @click="openPost(post)">
+            <button v-for="(post, index) in posts" :key="post.id" v-reveal-once="{ key: post.id, delay: Math.min(130 + index * 22, 360) }" class="post-card" :class="['tone-' + (index % 4)]" @click="openPost(post)">
               <div class="card-top"><span class="kind-label" :class="post.kind">{{ humanKind(post.kind) }}</span><span class="card-date">{{ dateText(post.approved_at || post.created_at) }}</span></div>
               <div class="item-illustration" :class="'illustration-' + (index % 4)"><span>{{ ['✳', '◌', '⌑', '✦'][index % 4] }}</span><i>{{ post.category || '校园物件' }}</i></div>
               <h3>{{ post.item_name }}</h3><p>{{ post.description }}</p>
