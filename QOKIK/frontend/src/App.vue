@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch, type Directive } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch, type Directive } from 'vue'
 
 type Kind = 'lost' | 'found'
 type Revision = {
@@ -43,6 +43,8 @@ const accountOpen = ref(false)
 const publishOpen = ref(false)
 const notice = ref('')
 const error = ref('')
+const toastKey = ref(0)
+let toastDismissTimer: ReturnType<typeof setTimeout> | undefined
 const busy = ref(false)
 const total = ref(0)
 const offset = ref(0)
@@ -191,11 +193,25 @@ async function refreshProfile() {
   } catch { accessToken.value = ''; profile.value = null }
 }
 watch(page, refresh)
+watch([notice, error], ([nextNotice, nextError]) => {
+  if (toastDismissTimer) clearTimeout(toastDismissTimer)
+  if (!nextNotice && !nextError) return
+  toastKey.value += 1
+  toastDismissTimer = setTimeout(dismissToast, 5000)
+})
 watch([page, selected], ([nextPage, nextSelected]) => {
   if (nextPage !== 'browse' || nextSelected) heroIntroEnabled.value = false
 })
 watch(() => [query.kind, query.status], () => { offset.value = 0; if (page.value === 'browse') refreshPosts() })
 onMounted(async () => { await refreshProfile(); await refresh() })
+onUnmounted(() => { if (toastDismissTimer) clearTimeout(toastDismissTimer) })
+
+function dismissToast() {
+  if (toastDismissTimer) clearTimeout(toastDismissTimer)
+  toastDismissTimer = undefined
+  notice.value = ''
+  error.value = ''
+}
 
 async function accountSubmit() {
   busy.value = true; error.value = ''
@@ -374,7 +390,11 @@ function postPayload() { return { ...postForm, category: postForm.category || nu
       <section v-if="page === 'browse' && !selected" class="closing-note"><span class="closing-mark">拾</span><div><b>一件小事，一个温柔的校园。</b><small>拾光 · 为每一份善意留个位置</small></div><span class="closing-right">HANGZHOU DIANZI UNIVERSITY<br />LOST & FOUND · 2026</span></section>
     </main>
 
-    <div v-if="notice || error" class="toast" :class="error ? 'toast-error' : ''"><span>{{ error || notice }}</span><button @click="notice = ''; error = ''">×</button></div>
+    <Transition name="toast">
+      <div v-if="notice || error" :key="toastKey" class="toast" :class="error ? 'toast-error' : ''" :role="error ? 'alert' : 'status'">
+        <span>{{ error || notice }}</span><button aria-label="关闭提示" @click="dismissToast">×</button>
+      </div>
+    </Transition>
 
     <div v-if="accountOpen" class="modal-backdrop" @click.self="accountOpen = false"><section class="dialog account-dialog"><button class="dialog-close" aria-label="关闭" @click="accountOpen = false">×</button><div class="eyebrow muted"><span class="eyebrow-line" /> {{ accountMode === 'login' ? '欢迎回来' : '加入校园互助' }}</div><h2>{{ accountMode === 'login' ? '继续拾光。' : '让善意有个入口。' }}</h2><p class="dialog-intro">登录后可以发布信息、提交线索，并私下联系物品的发布者。</p><form class="stack-form" @submit.prevent="accountSubmit"><label>用户名<input v-model="form.username" required autocomplete="username" placeholder="2–32 位字母、数字或符号" /></label><label>密码<input v-model="form.password" type="password" required minlength="10" autocomplete="current-password" placeholder="至少 10 位" /></label><template v-if="accountMode === 'register'"><label>称呼<input v-model="form.nickname" required maxlength="40" placeholder="大家怎么称呼你" /></label><label>学号<input v-model="form.student_number" required minlength="4" placeholder="仅用于本地账号标识" /></label><small class="form-note">当前未连接学校统一身份认证，学号尚未由学校核验。</small></template><button class="primary-action" :disabled="busy">{{ busy ? '请稍候…' : accountMode === 'login' ? '登录' : '创建账号' }} <span>→</span></button></form><button class="switch-mode" @click="accountMode = accountMode === 'login' ? 'register' : 'login'">{{ accountMode === 'login' ? '还没有账号？创建一个' : '已有账号？返回登录' }}</button></section></div>
 
