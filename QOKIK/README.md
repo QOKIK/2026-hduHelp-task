@@ -115,4 +115,4 @@ python e2e/journey.py
 - `/api/admin/reviews`、`/api/admin/reports`：审核和举报工作台
 - `/api/health`：确认 API 与 PostgreSQL 可用
 
-API 认证使用 `Authorization: Bearer <access_token>`。Refresh JWT 只能通过 HttpOnly Cookie 发送。管理端没有普通用户自助提升管理员权限的接口。生产部署、学校统一认证接入和 ICP 备案仍不在当前实现范围内。
+完整接口路径、请求字段、权限及隐私边界见 [API 文档](API.md)。API 认证使用 `Authorization: Bearer <access_token>`。Refresh JWT 只能通过 HttpOnly Cookie 发送。管理端没有普通用户自助提升管理员权限的接口。生产部署、学校统一认证接入和 ICP 备案仍不在当前实现范围内。
