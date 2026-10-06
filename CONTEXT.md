@@ -12,17 +12,23 @@ The system connects campus users who report missing items with users who find it
 
 **Found notice**: A post created by someone who found an item and is trying to return it to its owner.
 
+**Private verification detail**: An optional, non-public characteristic supplied by the author of a found notice to help verify a claim. A related claim request may include a private answer; the author sees both, while other access follows the existing claim-request rules.
+
 **Claim request**: A private request sent in response to a found notice by someone who believes the item belongs to them.
 
 **Lead**: Information sent in response to a lost report by someone who may know where the item is or who has it.
 
 Lost reports and found notices share basic item, location, event-time, and description information. Their type identifies whether the author lost or found the item.
 
+**Similar-post recommendation**: A rule-ranked suggestion between a public, approved, current lost report and found notice, based on their shared item details.
+
 **Lost report status**: A lost report moves through `寻找中` (the owner is still looking), `已找回` (the item has been recovered), and `已结束` (the report is closed).
 
 **Found notice status**: A found notice moves through `待认领` (the owner has not yet been identified), `已归还` (the item has been returned), and `已结束` (the notice is closed).
 
 The post author may directly change a lost report to `已找回` or a found notice to `已归还` or `已结束`. Closing a post also closes its outstanding requests.
+
+**Post freshness status**: Whether an unresolved post has been confirmed as still valid within the last 30 days. `待确认` is independent of lifecycle and moderation statuses and does not itself hide a post from public browsing.
 
 **Post revision**: A proposed material edit to an approved public post. The existing approved version remains public until the revision is approved, when the new version replaces it. A newer edit replaces the single pending revision.
 
