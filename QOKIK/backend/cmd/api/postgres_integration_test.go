@@ -196,7 +196,7 @@ func TestPostgresAPIAuthAndModeration(t *testing.T) {
 	owner2 := registerUser("owner2", "23010002")
 	stranger := registerUser("stranger", "23010003")
 	outsider := registerUser("outsider", "23010005")
-	found := request(http.MethodPost, "/api/posts", map[string]any{"kind": "found", "item_name": "拾获的水壶", "description": "绿色水壶，底部贴有姓名标签。"}, pair.Access, nil)
+	found := request(http.MethodPost, "/api/posts", map[string]any{"kind": "found", "item_name": "拾获的水壶", "description": "绿色水壶，底部贴有姓名标签。", "category": "水杯", "location": "图书馆", "event_time": "2026年9月30日", "private_verification_detail": "壶盖内侧刻有 731"}, pair.Access, nil)
 	if found.Code != http.StatusCreated {
 		t.Fatalf("create found notice status=%d", found.Code)
 	}
@@ -207,8 +207,16 @@ func TestPostgresAPIAuthAndModeration(t *testing.T) {
 	if approvedFound := request(http.MethodPost, "/api/admin/reviews/"+jsonNumber(foundPost.ID)+"/approve", nil, adminPair.Access, nil); approvedFound.Code != http.StatusOK {
 		t.Fatalf("approve found notice status=%d", approvedFound.Code)
 	}
-	claim1 := request(http.MethodPost, "/api/posts/"+jsonNumber(foundPost.ID)+"/requests", map[string]any{"explanation": "壶底有我的名字标签。", "contact_method": "email first@example.test"}, owner2, nil)
-	claim2 := request(http.MethodPost, "/api/posts/"+jsonNumber(foundPost.ID)+"/requests", map[string]any{"explanation": "壶盖内侧有一道划痕。", "contact_method": "email second@example.test"}, stranger, nil)
+	publicFound := request(http.MethodGet, "/api/posts/"+jsonNumber(foundPost.ID), nil, "", nil)
+	if strings.Contains(publicFound.Body.String(), "壶盖内侧刻有 731") || !strings.Contains(publicFound.Body.String(), `"requires_claim_verification":true`) {
+		t.Fatalf("public post exposed the private clue or omitted the required-answer flag: %s", publicFound.Body.String())
+	}
+	missingAnswer := request(http.MethodPost, "/api/posts/"+jsonNumber(foundPost.ID)+"/requests", map[string]any{"explanation": "壶底有我的名字标签。", "contact_method": "email missing@example.test"}, owner2, nil)
+	if missingAnswer.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("claim without required private answer status=%d body=%s", missingAnswer.Code, missingAnswer.Body.String())
+	}
+	claim1 := request(http.MethodPost, "/api/posts/"+jsonNumber(foundPost.ID)+"/requests", map[string]any{"explanation": "壶底有我的名字标签。", "contact_method": "email first@example.test", "verification_answer": "壶盖内侧刻有 731"}, owner2, nil)
+	claim2 := request(http.MethodPost, "/api/posts/"+jsonNumber(foundPost.ID)+"/requests", map[string]any{"explanation": "壶盖内侧有一道划痕。", "contact_method": "email second@example.test", "verification_answer": "里面有蓝色贴纸"}, stranger, nil)
 	if claim1.Code != http.StatusCreated || claim2.Code != http.StatusCreated {
 		t.Fatalf("create claims statuses=%d,%d", claim1.Code, claim2.Code)
 	}
@@ -217,21 +225,122 @@ func TestPostgresAPIAuthAndModeration(t *testing.T) {
 	}
 	_ = json.Unmarshal(claim1.Body.Bytes(), &firstClaim)
 	_ = json.Unmarshal(claim2.Body.Bytes(), &secondClaim)
+	if ownRequest := request(http.MethodGet, "/api/requests/"+jsonNumber(firstClaim.ID), nil, owner2, nil); !strings.Contains(ownRequest.Body.String(), "壶盖内侧刻有 731") {
+		t.Fatalf("claimant could not see their own verification answer: %s", ownRequest.Body.String())
+	}
 	if denied := request(http.MethodGet, "/api/requests/"+jsonNumber(firstClaim.ID), nil, outsider, nil); denied.Code != http.StatusForbidden {
 		t.Fatalf("private request leaked to stranger, status=%d", denied.Code)
 	}
-	if unopened := request(http.MethodGet, "/api/admin/reports", nil, adminPair.Access, nil); strings.Contains(unopened.Body.String(), "first@example.test") {
+	if unopened := request(http.MethodGet, "/api/admin/reports", nil, adminPair.Access, nil); strings.Contains(unopened.Body.String(), "first@example.test") || strings.Contains(unopened.Body.String(), "壶盖内侧刻有 731") {
 		t.Fatalf("unreported request appeared to admin: %s", unopened.Body.String())
 	}
-	if authorView := request(http.MethodGet, "/api/posts/"+jsonNumber(foundPost.ID)+"/requests", nil, pair.Access, nil); authorView.Code != http.StatusOK || !strings.Contains(authorView.Body.String(), "first@example.test") {
+	if ownerList := request(http.MethodGet, "/api/my/posts", nil, pair.Access, nil); !strings.Contains(ownerList.Body.String(), "壶盖内侧刻有 731") {
+		t.Fatalf("author could not see their private verification clue: %s", ownerList.Body.String())
+	}
+	if authorView := request(http.MethodGet, "/api/posts/"+jsonNumber(foundPost.ID)+"/requests", nil, pair.Access, nil); authorView.Code != http.StatusOK || !strings.Contains(authorView.Body.String(), "first@example.test") || !strings.Contains(authorView.Body.String(), "壶盖内侧刻有 731") {
 		t.Fatalf("author could not view their requests: %d %s", authorView.Code, authorView.Body.String())
+	}
+	secretEdit := request(http.MethodPut, "/api/posts/"+jsonNumber(foundPost.ID), map[string]any{"kind": "found", "item_name": "拾获的水壶", "description": "绿色水壶，底部贴有姓名标签。", "category": "水杯", "location": "图书馆", "event_time": "2026年9月30日", "private_verification_detail": "杯底有一道细小裂纹"}, pair.Access, nil)
+	if secretEdit.Code != http.StatusOK {
+		t.Fatalf("submit private clue edit status=%d body=%s", secretEdit.Code, secretEdit.Body.String())
+	}
+	if unchanged := request(http.MethodGet, "/api/my/posts", nil, pair.Access, nil); !strings.Contains(unchanged.Body.String(), "壶盖内侧刻有 731") || !strings.Contains(unchanged.Body.String(), "杯底有一道细小裂纹") {
+		t.Fatalf("pending private-clue edit did not retain active and draft versions: %s", unchanged.Body.String())
 	}
 	if reported := request(http.MethodPost, "/api/requests/"+jsonNumber(firstClaim.ID)+"/reports", map[string]any{"explanation": "请求内容需要管理员核查。"}, owner2, nil); reported.Code != http.StatusCreated {
 		t.Fatalf("report private request status=%d", reported.Code)
 	}
 	adminQueue := request(http.MethodGet, "/api/admin/reports", nil, adminPair.Access, nil)
-	if !strings.Contains(adminQueue.Body.String(), "first@example.test") {
+	if !strings.Contains(adminQueue.Body.String(), "first@example.test") || !strings.Contains(adminQueue.Body.String(), "壶盖内侧刻有 731") {
 		t.Fatalf("participant report did not reveal the target to admin: %s", adminQueue.Body.String())
+	}
+	if approvedSecretEdit := request(http.MethodPost, "/api/admin/reviews/"+jsonNumber(foundPost.ID)+"/approve", nil, adminPair.Access, nil); approvedSecretEdit.Code != http.StatusOK {
+		t.Fatalf("approve private clue revision status=%d body=%s", approvedSecretEdit.Code, approvedSecretEdit.Body.String())
+	}
+	if replaced := request(http.MethodGet, "/api/my/posts", nil, pair.Access, nil); !strings.Contains(replaced.Body.String(), "杯底有一道细小裂纹") || strings.Contains(replaced.Body.String(), "壶盖内侧刻有 731") {
+		t.Fatalf("approved private-clue edit did not replace the previous detail: %s", replaced.Body.String())
+	}
+	clearEdit := request(http.MethodPut, "/api/posts/"+jsonNumber(foundPost.ID), map[string]any{"kind": "found", "item_name": "拾获的水壶", "description": "绿色水壶，底部贴有姓名标签。", "category": "水杯", "location": "图书馆", "event_time": "2026年9月30日", "private_verification_detail": ""}, pair.Access, nil)
+	if clearEdit.Code != http.StatusOK {
+		t.Fatalf("submit private clue removal status=%d body=%s", clearEdit.Code, clearEdit.Body.String())
+	}
+	if pendingClear := request(http.MethodGet, "/api/my/posts", nil, pair.Access, nil); !strings.Contains(pendingClear.Body.String(), "杯底有一道细小裂纹") || !strings.Contains(pendingClear.Body.String(), `"private_verification_detail":null`) {
+		t.Fatalf("pending clear did not preserve the old clue separately from the empty draft: %s", pendingClear.Body.String())
+	}
+	if approvedClear := request(http.MethodPost, "/api/admin/reviews/"+jsonNumber(foundPost.ID)+"/approve", nil, adminPair.Access, nil); approvedClear.Code != http.StatusOK {
+		t.Fatalf("approve private clue removal status=%d body=%s", approvedClear.Code, approvedClear.Body.String())
+	}
+	if cleared := request(http.MethodGet, "/api/my/posts", nil, pair.Access, nil); !strings.Contains(cleared.Body.String(), `"private_verification_detail":null`) {
+		t.Fatalf("approved private clue was not cleared: %s", cleared.Body.String())
+	}
+	match := request(http.MethodPost, "/api/posts", map[string]any{"kind": "lost", "item_name": "水壶", "description": "蓝色水壶，图书馆遗失。", "category": "水杯", "location": "图书馆", "event_time": "2026年9月30日"}, owner2, nil)
+	if match.Code != http.StatusCreated {
+		t.Fatalf("create recommendation match status=%d body=%s", match.Code, match.Body.String())
+	}
+	var matchPost struct {
+		ID int64 `json:"id"`
+	}
+	_ = json.Unmarshal(match.Body.Bytes(), &matchPost)
+	if approvedMatch := request(http.MethodPost, "/api/admin/reviews/"+jsonNumber(matchPost.ID)+"/approve", nil, adminPair.Access, nil); approvedMatch.Code != http.StatusOK {
+		t.Fatalf("approve recommendation match status=%d", approvedMatch.Code)
+	}
+	sameAuthor := request(http.MethodPost, "/api/posts", map[string]any{"kind": "lost", "item_name": "水壶", "description": "另一个水壶线索，图书馆。", "category": "水杯", "location": "图书馆", "event_time": "2026年9月30日"}, pair.Access, nil)
+	if sameAuthor.Code != http.StatusCreated {
+		t.Fatalf("create same-author candidate status=%d", sameAuthor.Code)
+	}
+	var ownCandidate struct {
+		ID int64 `json:"id"`
+	}
+	_ = json.Unmarshal(sameAuthor.Body.Bytes(), &ownCandidate)
+	if approvedOwn := request(http.MethodPost, "/api/admin/reviews/"+jsonNumber(ownCandidate.ID)+"/approve", nil, adminPair.Access, nil); approvedOwn.Code != http.StatusOK {
+		t.Fatalf("approve same-author candidate status=%d", approvedOwn.Code)
+	}
+	recommendations := request(http.MethodGet, "/api/posts/"+jsonNumber(foundPost.ID)+"/recommendations", nil, "", nil)
+	if recommendations.Code != http.StatusOK || !strings.Contains(recommendations.Body.String(), "水壶") || !strings.Contains(recommendations.Body.String(), "名称关键词相近") || strings.Contains(recommendations.Body.String(), "杯底有一道细小裂纹") || strings.Contains(recommendations.Body.String(), "另一个水壶线索") {
+		t.Fatalf("recommendation candidate, explanation, privacy, or author exclusion failed: %d %s", recommendations.Code, recommendations.Body.String())
+	}
+	var owner2ID int64
+	if err = db.QueryRow(ctx, "SELECT id FROM users WHERE username='owner2'").Scan(&owner2ID); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 6; i++ {
+		if _, err = db.Exec(ctx, `INSERT INTO posts(author_id,kind,item_name,description,category,location,event_time,lifecycle_status,moderation_status,approved_at) VALUES($1,'lost','水壶','测试候选描述','水杯','图书馆','2026年9月30日','寻找中','已通过',now())`, owner2ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	topFive := request(http.MethodGet, "/api/posts/"+jsonNumber(foundPost.ID)+"/recommendations", nil, "", nil)
+	var ranked struct {
+		Items []struct {
+			ID      int64    `json:"id"`
+			Reasons []string `json:"match_reasons"`
+		} `json:"items"`
+	}
+	if err = json.Unmarshal(topFive.Body.Bytes(), &ranked); err != nil {
+		t.Fatal(err)
+	}
+	if len(ranked.Items) != 5 {
+		t.Fatalf("recommendation count=%d want 5: %s", len(ranked.Items), topFive.Body.String())
+	}
+	for i := 1; i < len(ranked.Items); i++ {
+		if ranked.Items[i-1].ID <= ranked.Items[i].ID {
+			t.Fatalf("recommendations not stably ranked by newest approval: %v", ranked.Items)
+		}
+	}
+	if duePost, err := db.Exec(ctx, `UPDATE posts SET approved_at=now()-interval '30 days',freshness_confirmed_at=NULL WHERE id=$1`, foundPost.ID); err != nil || duePost.RowsAffected() != 1 {
+		t.Fatal("failed to seed due freshness timestamp")
+	}
+	duePublic := request(http.MethodGet, "/api/posts/"+jsonNumber(foundPost.ID), nil, "", nil)
+	if !strings.Contains(duePublic.Body.String(), `"freshness_status":"待确认"`) {
+		t.Fatalf("30-day post freshness badge missing: %s", duePublic.Body.String())
+	}
+	if staleRecommendations := request(http.MethodGet, "/api/posts/"+jsonNumber(matchPost.ID)+"/recommendations", nil, "", nil); strings.Contains(staleRecommendations.Body.String(), `"id":`+jsonNumber(foundPost.ID)) {
+		t.Fatalf("stale post remained a recommendation candidate: %s", staleRecommendations.Body.String())
+	}
+	if deniedConfirm := request(http.MethodPost, "/api/posts/"+jsonNumber(foundPost.ID)+"/confirm", map[string]any{}, outsider, nil); deniedConfirm.Code != http.StatusForbidden {
+		t.Fatalf("non-author confirmed freshness, status=%d", deniedConfirm.Code)
+	}
+	if confirm := request(http.MethodPost, "/api/posts/"+jsonNumber(foundPost.ID)+"/confirm", map[string]any{}, pair.Access, nil); confirm.Code != http.StatusOK || strings.Contains(confirm.Body.String(), `"freshness_status":"待确认"`) {
+		t.Fatalf("author freshness confirmation failed: %d %s", confirm.Code, confirm.Body.String())
 	}
 	accepted := request(http.MethodPost, "/api/requests/"+jsonNumber(firstClaim.ID)+"/accept", nil, pair.Access, nil)
 	if accepted.Code != http.StatusOK {

@@ -43,12 +43,13 @@ type user struct {
 	Student  string `json:"student_number,omitempty"`
 }
 type postInput struct {
-	Kind        string  `json:"kind"`
-	Item        string  `json:"item_name"`
-	Description string  `json:"description"`
-	Category    *string `json:"category"`
-	Location    *string `json:"location"`
-	EventTime   *string `json:"event_time"`
+	Kind          string  `json:"kind"`
+	Item          string  `json:"item_name"`
+	Description   string  `json:"description"`
+	Category      *string `json:"category"`
+	Location      *string `json:"location"`
+	EventTime     *string `json:"event_time"`
+	PrivateDetail *string `json:"private_verification_detail"`
 }
 
 func main() {
@@ -323,8 +324,10 @@ func (s *server) routes(r *gin.Engine) {
 	r.GET("/api/auth/me", s.access, func(c *gin.Context) { c.JSON(200, profile(current(c))) })
 	r.GET("/api/posts", s.listPosts)
 	r.GET("/api/posts/:id", s.publicPost)
+	r.GET("/api/posts/:id/recommendations", s.recommendations)
 	r.POST("/api/posts", s.access, s.createPost)
 	r.GET("/api/my/posts", s.access, s.myPosts)
+	r.POST("/api/posts/:id/confirm", s.access, s.confirmPost)
 	r.PUT("/api/posts/:id", s.access, s.updatePost)
 	r.POST("/api/posts/:id/status", s.access, s.setPostStatus)
 	r.DELETE("/api/posts/:id", s.access, s.deletePost)
@@ -468,9 +471,12 @@ func (s *server) postByID(c *gin.Context, id int64, public bool) (gin.H, error) 
 	var authorID int64
 	var postID int64
 	var kind, item, description, lifecycle, moderation, nickname string
+	var privateDetail *string
+	var freshnessConfirmed *time.Time
+	var freshnessDue bool
 	var created time.Time
-	q := `SELECT p.id,p.author_id,p.kind,p.item_name,p.description,p.category,p.location,p.event_time,p.lifecycle_status,p.moderation_status,p.rejection_reason,p.withdrawn,p.created_at,p.approved_at,u.nickname FROM posts p JOIN users u ON u.id=p.author_id WHERE p.id=$1`
-	e := s.db.QueryRow(c, q, id).Scan(&postID, &authorID, &kind, &item, &description, &category, &location, &event, &lifecycle, &moderation, &rejection, &withdrawn, &created, &approved, &nickname)
+	q := `SELECT p.id,p.author_id,p.kind,p.item_name,p.description,p.category,p.location,p.event_time,p.lifecycle_status,p.moderation_status,p.rejection_reason,p.withdrawn,p.created_at,p.approved_at,u.nickname,p.private_verification_detail,p.freshness_confirmed_at,(p.moderation_status='已通过' AND NOT p.withdrawn AND p.lifecycle_status IN ('寻找中','待认领') AND COALESCE(GREATEST(p.freshness_confirmed_at,p.approved_at),p.approved_at,p.created_at)<=now()-interval '30 days') FROM posts p JOIN users u ON u.id=p.author_id WHERE p.id=$1`
+	e := s.db.QueryRow(c, q, id).Scan(&postID, &authorID, &kind, &item, &description, &category, &location, &event, &lifecycle, &moderation, &rejection, &withdrawn, &created, &approved, &nickname, &privateDetail, &freshnessConfirmed, &freshnessDue)
 	if e != nil {
 		return nil, e
 	}
@@ -487,6 +493,17 @@ func (s *server) postByID(c *gin.Context, id int64, public bool) (gin.H, error) 
 	p["withdrawn"] = withdrawn
 	p["approved_at"] = approved
 	p["author_id"] = authorID
+	p["freshness_status"] = "有效"
+	if freshnessDue {
+		p["freshness_status"] = "待确认"
+	}
+	p["requires_claim_verification"] = kind == "found" && privateDetail != nil && strings.TrimSpace(*privateDetail) != ""
+	if !public {
+		if value, ok := c.Get("user"); ok && value.(user).ID == authorID {
+			p["private_verification_detail"] = privateDetail
+		}
+	}
+	p["freshness_confirmed_at"] = freshnessConfirmed
 	return p, nil
 }
 func (s *server) listPosts(c *gin.Context) {
@@ -559,6 +576,16 @@ func (s *server) publicPost(c *gin.Context) {
 func inputValid(in postInput) bool {
 	return (in.Kind == "lost" || in.Kind == "found") && validText(in.Item, 1, 100) && validText(in.Description, 5, 3000)
 }
+func validPrivateDetail(kind string, detail *string) bool {
+	return detail == nil || strings.TrimSpace(*detail) == "" || (kind == "found" && validText(strings.TrimSpace(*detail), 1, 300))
+}
+func cleanPrivateDetail(detail *string) *string {
+	if detail == nil || strings.TrimSpace(*detail) == "" {
+		return nil
+	}
+	value := strings.TrimSpace(*detail)
+	return &value
+}
 func (s *server) createPost(c *gin.Context) {
 	var in postInput
 	if !bind(c, &in) {
@@ -568,13 +595,17 @@ func (s *server) createPost(c *gin.Context) {
 		fail(c, 422, "内容格式无效")
 		return
 	}
+	if !validPrivateDetail(in.Kind, in.PrivateDetail) {
+		fail(c, 422, "私密特征仅可用于拾获公告，且不超过 300 字")
+		return
+	}
 	status := "寻找中"
 	if in.Kind == "found" {
 		status = "待认领"
 	}
 	u := current(c)
 	var id int64
-	e := s.db.QueryRow(c, `INSERT INTO posts(author_id,kind,item_name,description,category,location,event_time,lifecycle_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`, u.ID, in.Kind, strings.TrimSpace(in.Item), strings.TrimSpace(in.Description), in.Category, in.Location, in.EventTime, status).Scan(&id)
+	e := s.db.QueryRow(c, `INSERT INTO posts(author_id,kind,item_name,description,category,location,event_time,lifecycle_status,private_verification_detail) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, u.ID, in.Kind, strings.TrimSpace(in.Item), strings.TrimSpace(in.Description), in.Category, in.Location, in.EventTime, status, cleanPrivateDetail(in.PrivateDetail)).Scan(&id)
 	if e != nil {
 		fail(c, 500, "发布失败")
 		return
@@ -601,12 +632,12 @@ func (s *server) myPosts(c *gin.Context) {
 		var rev gin.H
 		var r gin.H = gin.H{}
 		var item, desc string
-		var cat, loc, ev, reason *string
+		var cat, loc, ev, reason, privateDetail *string
 		var mod string
 		var created time.Time
-		err = s.db.QueryRow(c, "SELECT item_name,description,category,location,event_time,moderation_status,rejection_reason,created_at FROM revisions WHERE post_id=$1", id).Scan(&item, &desc, &cat, &loc, &ev, &mod, &reason, &created)
+		err = s.db.QueryRow(c, "SELECT item_name,description,category,location,event_time,moderation_status,rejection_reason,created_at,private_verification_detail FROM revisions WHERE post_id=$1", id).Scan(&item, &desc, &cat, &loc, &ev, &mod, &reason, &created, &privateDetail)
 		if err == nil {
-			r = gin.H{"post_id": id, "item_name": item, "description": desc, "category": cat, "location": loc, "event_time": ev, "moderation_status": mod, "rejection_reason": reason, "created_at": created}
+			r = gin.H{"post_id": id, "item_name": item, "description": desc, "category": cat, "location": loc, "event_time": ev, "private_verification_detail": privateDetail, "moderation_status": mod, "rejection_reason": reason, "created_at": created}
 			rev = r
 		}
 		if rev != nil && mod == "待审核" {
@@ -635,6 +666,10 @@ func (s *server) updatePost(c *gin.Context) {
 		fail(c, 422, "内容格式无效")
 		return
 	}
+	if !validPrivateDetail(in.Kind, in.PrivateDetail) {
+		fail(c, 422, "私密特征仅可用于拾获公告，且不超过 300 字")
+		return
+	}
 	tx, e := s.db.Begin(c)
 	if e != nil {
 		fail(c, 500, "更新失败")
@@ -657,9 +692,9 @@ func (s *server) updatePost(c *gin.Context) {
 		return
 	}
 	if moderation == "已通过" {
-		_, e = tx.Exec(c, `INSERT INTO revisions(post_id,item_name,description,category,location,event_time,moderation_status,rejection_reason,created_at) VALUES($1,$2,$3,$4,$5,$6,'待审核',NULL,now()) ON CONFLICT(post_id) DO UPDATE SET item_name=EXCLUDED.item_name,description=EXCLUDED.description,category=EXCLUDED.category,location=EXCLUDED.location,event_time=EXCLUDED.event_time,moderation_status='待审核',rejection_reason=NULL,created_at=now()`, id, strings.TrimSpace(in.Item), strings.TrimSpace(in.Description), in.Category, in.Location, in.EventTime)
+		_, e = tx.Exec(c, `INSERT INTO revisions(post_id,item_name,description,category,location,event_time,private_verification_detail,moderation_status,rejection_reason,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,'待审核',NULL,now()) ON CONFLICT(post_id) DO UPDATE SET item_name=EXCLUDED.item_name,description=EXCLUDED.description,category=EXCLUDED.category,location=EXCLUDED.location,event_time=EXCLUDED.event_time,private_verification_detail=EXCLUDED.private_verification_detail,moderation_status='待审核',rejection_reason=NULL,created_at=now()`, id, strings.TrimSpace(in.Item), strings.TrimSpace(in.Description), in.Category, in.Location, in.EventTime, cleanPrivateDetail(in.PrivateDetail))
 	} else {
-		_, e = tx.Exec(c, `UPDATE posts SET item_name=$2,description=$3,category=$4,location=$5,event_time=$6,moderation_status='待审核',rejection_reason=NULL WHERE id=$1`, id, strings.TrimSpace(in.Item), strings.TrimSpace(in.Description), in.Category, in.Location, in.EventTime)
+		_, e = tx.Exec(c, `UPDATE posts SET item_name=$2,description=$3,category=$4,location=$5,event_time=$6,private_verification_detail=$7,moderation_status='待审核',rejection_reason=NULL WHERE id=$1`, id, strings.TrimSpace(in.Item), strings.TrimSpace(in.Description), in.Category, in.Location, in.EventTime, cleanPrivateDetail(in.PrivateDetail))
 	}
 	if e != nil {
 		fail(c, 500, "更新失败")
@@ -775,25 +810,26 @@ func (s *server) deletePost(c *gin.Context) {
 }
 
 type requestRow struct {
-	ID          int64     `json:"id"`
-	PostID      int64     `json:"post_id"`
-	Kind        string    `json:"kind"`
-	Explanation string    `json:"explanation"`
-	Contact     string    `json:"contact_method"`
-	Status      string    `json:"status"`
-	Reason      *string   `json:"resolution_reason"`
-	Created     time.Time `json:"created_at"`
-	Item        *string   `json:"item_name,omitempty"`
-	Nickname    *string   `json:"requester_nickname,omitempty"`
-	RequesterID int64     `json:"-"`
-	AuthorID    int64     `json:"-"`
-	PostKind    string    `json:"-"`
-	Removed     bool      `json:"-"`
+	ID                 int64     `json:"id"`
+	PostID             int64     `json:"post_id"`
+	Kind               string    `json:"kind"`
+	Explanation        string    `json:"explanation"`
+	Contact            string    `json:"contact_method"`
+	VerificationAnswer *string   `json:"verification_answer,omitempty"`
+	Status             string    `json:"status"`
+	Reason             *string   `json:"resolution_reason"`
+	Created            time.Time `json:"created_at"`
+	Item               *string   `json:"item_name,omitempty"`
+	Nickname           *string   `json:"requester_nickname,omitempty"`
+	RequesterID        int64     `json:"-"`
+	AuthorID           int64     `json:"-"`
+	PostKind           string    `json:"-"`
+	Removed            bool      `json:"-"`
 }
 
 func (s *server) getRequest(c *gin.Context, id int64) (requestRow, error) {
 	var r requestRow
-	e := s.db.QueryRow(c, `SELECT q.id,q.post_id,q.kind,q.explanation,q.contact_method,q.status,q.resolution_reason,q.created_at,q.requester_id,p.author_id,p.kind,q.removed FROM requests q JOIN posts p ON p.id=q.post_id WHERE q.id=$1`, id).Scan(&r.ID, &r.PostID, &r.Kind, &r.Explanation, &r.Contact, &r.Status, &r.Reason, &r.Created, &r.RequesterID, &r.AuthorID, &r.PostKind, &r.Removed)
+	e := s.db.QueryRow(c, `SELECT q.id,q.post_id,q.kind,q.explanation,q.contact_method,q.status,q.resolution_reason,q.created_at,q.requester_id,p.author_id,p.kind,q.removed,q.verification_answer FROM requests q JOIN posts p ON p.id=q.post_id WHERE q.id=$1`, id).Scan(&r.ID, &r.PostID, &r.Kind, &r.Explanation, &r.Contact, &r.Status, &r.Reason, &r.Created, &r.RequesterID, &r.AuthorID, &r.PostKind, &r.Removed, &r.VerificationAnswer)
 	if r.Removed && e == nil {
 		return r, pgx.ErrNoRows
 	}
@@ -803,8 +839,9 @@ func (s *server) createRequest(c *gin.Context) {
 	postID, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	u := current(c)
 	var in struct {
-		Explanation string `json:"explanation"`
-		Contact     string `json:"contact_method"`
+		Explanation        string `json:"explanation"`
+		Contact            string `json:"contact_method"`
+		VerificationAnswer string `json:"verification_answer"`
 	}
 	if !bind(c, &in) {
 		return
@@ -822,7 +859,8 @@ func (s *server) createRequest(c *gin.Context) {
 	var authorID int64
 	var kind, lifecycle, moderation string
 	var withdrawn bool
-	e = tx.QueryRow(c, "SELECT author_id,kind,lifecycle_status,moderation_status,withdrawn FROM posts WHERE id=$1 FOR UPDATE", postID).Scan(&authorID, &kind, &lifecycle, &moderation, &withdrawn)
+	var privateDetail *string
+	e = tx.QueryRow(c, "SELECT author_id,kind,lifecycle_status,moderation_status,withdrawn,private_verification_detail FROM posts WHERE id=$1 FOR UPDATE", postID).Scan(&authorID, &kind, &lifecycle, &moderation, &withdrawn, &privateDetail)
 	if e != nil || moderation != "已通过" || withdrawn {
 		fail(c, 404, "内容不存在")
 		return
@@ -835,12 +873,22 @@ func (s *server) createRequest(c *gin.Context) {
 		fail(c, 409, "该内容已结束处理")
 		return
 	}
+	answer := strings.TrimSpace(in.VerificationAnswer)
+	requiresAnswer := kind == "found" && privateDetail != nil && strings.TrimSpace(*privateDetail) != ""
+	if requiresAnswer && !validText(answer, 1, 500) {
+		fail(c, 422, "请回答发布者设置的私密核验问题")
+		return
+	}
+	var answerValue *string
+	if requiresAnswer && validText(answer, 1, 500) {
+		answerValue = &answer
+	}
 	requestKind := "lead"
 	if kind == "found" {
 		requestKind = "claim"
 	}
 	var id int64
-	e = tx.QueryRow(c, "INSERT INTO requests(post_id,requester_id,kind,explanation,contact_method) VALUES($1,$2,$3,$4,$5) RETURNING id", postID, u.ID, requestKind, strings.TrimSpace(in.Explanation), strings.TrimSpace(in.Contact)).Scan(&id)
+	e = tx.QueryRow(c, "INSERT INTO requests(post_id,requester_id,kind,explanation,contact_method,verification_answer) VALUES($1,$2,$3,$4,$5,$6) RETURNING id", postID, u.ID, requestKind, strings.TrimSpace(in.Explanation), strings.TrimSpace(in.Contact), answerValue).Scan(&id)
 	if e != nil {
 		fail(c, 500, "提交失败")
 		return
@@ -854,7 +902,7 @@ func (s *server) createRequest(c *gin.Context) {
 }
 func (s *server) myRequests(c *gin.Context) {
 	u := current(c)
-	rows, e := s.db.Query(c, `SELECT q.id,q.post_id,q.kind,q.explanation,q.contact_method,q.status,q.resolution_reason,q.created_at,p.item_name FROM requests q JOIN posts p ON p.id=q.post_id WHERE q.requester_id=$1 AND q.removed=false ORDER BY q.created_at DESC`, u.ID)
+	rows, e := s.db.Query(c, `SELECT q.id,q.post_id,q.kind,q.explanation,q.contact_method,q.status,q.resolution_reason,q.created_at,p.item_name,q.verification_answer FROM requests q JOIN posts p ON p.id=q.post_id WHERE q.requester_id=$1 AND q.removed=false ORDER BY q.created_at DESC`, u.ID)
 	if e != nil {
 		fail(c, 500, "查询失败")
 		return
@@ -864,8 +912,15 @@ func (s *server) myRequests(c *gin.Context) {
 	for rows.Next() {
 		var r requestRow
 		var item string
-		_ = rows.Scan(&r.ID, &r.PostID, &r.Kind, &r.Explanation, &r.Contact, &r.Status, &r.Reason, &r.Created, &item)
-		out = append(out, gin.H{"id": r.ID, "post_id": r.PostID, "kind": r.Kind, "explanation": r.Explanation, "contact_method": r.Contact, "status": r.Status, "resolution_reason": r.Reason, "created_at": r.Created, "item_name": item})
+		if e = rows.Scan(&r.ID, &r.PostID, &r.Kind, &r.Explanation, &r.Contact, &r.Status, &r.Reason, &r.Created, &item, &r.VerificationAnswer); e != nil {
+			fail(c, 500, "查询失败")
+			return
+		}
+		out = append(out, gin.H{"id": r.ID, "post_id": r.PostID, "kind": r.Kind, "explanation": r.Explanation, "contact_method": r.Contact, "verification_answer": r.VerificationAnswer, "status": r.Status, "resolution_reason": r.Reason, "created_at": r.Created, "item_name": item})
+	}
+	if e = rows.Err(); e != nil {
+		fail(c, 500, "查询失败")
+		return
 	}
 	c.JSON(200, out)
 }
@@ -880,7 +935,7 @@ func (s *server) postRequests(c *gin.Context) {
 		fail(c, 403, "只有内容发布者能查看请求")
 		return
 	}
-	rows, e := s.db.Query(c, `SELECT q.id,q.post_id,q.kind,q.explanation,q.contact_method,q.status,q.resolution_reason,q.created_at,q.requester_id,u.nickname FROM requests q JOIN users u ON u.id=q.requester_id WHERE q.post_id=$1 AND q.removed=false ORDER BY q.created_at DESC`, id)
+	rows, e := s.db.Query(c, `SELECT q.id,q.post_id,q.kind,q.explanation,q.contact_method,q.status,q.resolution_reason,q.created_at,q.requester_id,u.nickname,q.verification_answer FROM requests q JOIN users u ON u.id=q.requester_id WHERE q.post_id=$1 AND q.removed=false ORDER BY q.created_at DESC`, id)
 	if e != nil {
 		fail(c, 500, "查询失败")
 		return
@@ -891,8 +946,15 @@ func (s *server) postRequests(c *gin.Context) {
 		var r requestRow
 		var uid int64
 		var nickname string
-		_ = rows.Scan(&r.ID, &r.PostID, &r.Kind, &r.Explanation, &r.Contact, &r.Status, &r.Reason, &r.Created, &uid, &nickname)
-		out = append(out, gin.H{"id": r.ID, "post_id": r.PostID, "kind": r.Kind, "explanation": r.Explanation, "contact_method": r.Contact, "status": r.Status, "resolution_reason": r.Reason, "created_at": r.Created, "requester_nickname": nickname})
+		if e = rows.Scan(&r.ID, &r.PostID, &r.Kind, &r.Explanation, &r.Contact, &r.Status, &r.Reason, &r.Created, &uid, &nickname, &r.VerificationAnswer); e != nil {
+			fail(c, 500, "查询失败")
+			return
+		}
+		out = append(out, gin.H{"id": r.ID, "post_id": r.PostID, "kind": r.Kind, "explanation": r.Explanation, "contact_method": r.Contact, "verification_answer": r.VerificationAnswer, "status": r.Status, "resolution_reason": r.Reason, "created_at": r.Created, "requester_nickname": nickname})
+	}
+	if e = rows.Err(); e != nil {
+		fail(c, 500, "查询失败")
+		return
 	}
 	c.JSON(200, out)
 }
@@ -1148,7 +1210,7 @@ func (s *server) review(c *gin.Context, approve bool) {
 		return
 	}
 	var rev postInput
-	e = tx.QueryRow(c, "SELECT item_name,description,category,location,event_time FROM revisions WHERE post_id=$1 AND moderation_status='待审核' FOR UPDATE", id).Scan(&rev.Item, &rev.Description, &rev.Category, &rev.Location, &rev.EventTime)
+	e = tx.QueryRow(c, "SELECT item_name,description,category,location,event_time,private_verification_detail FROM revisions WHERE post_id=$1 AND moderation_status='待审核' FOR UPDATE", id).Scan(&rev.Item, &rev.Description, &rev.Category, &rev.Location, &rev.EventTime, &rev.PrivateDetail)
 	hasRev := e == nil
 	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
 		fail(c, 500, "读取审核内容失败")
@@ -1159,7 +1221,7 @@ func (s *server) review(c *gin.Context, approve bool) {
 		return
 	}
 	if hasRev && approve {
-		_, e = tx.Exec(c, `UPDATE posts SET item_name=$2,description=$3,category=$4,location=$5,event_time=$6,approved_at=now() WHERE id=$1`, id, rev.Item, rev.Description, rev.Category, rev.Location, rev.EventTime)
+		_, e = tx.Exec(c, `UPDATE posts SET item_name=$2,description=$3,category=$4,location=$5,event_time=$6,private_verification_detail=$7,approved_at=now() WHERE id=$1`, id, rev.Item, rev.Description, rev.Category, rev.Location, rev.EventTime, cleanPrivateDetail(rev.PrivateDetail))
 		if e == nil {
 			_, e = tx.Exec(c, "UPDATE revisions SET moderation_status='已通过',rejection_reason=NULL WHERE post_id=$1", id)
 		}
@@ -1243,9 +1305,10 @@ func (s *server) adminReports(c *gin.Context) {
 		} else {
 			var qi int64
 			var explanation, contact, kind, qstatus, name, nick string
-			e = s.db.QueryRow(c, `SELECT q.id,q.explanation,q.contact_method,q.kind,q.status,p.item_name,u.nickname FROM requests q JOIN posts p ON p.id=q.post_id JOIN users u ON u.id=q.requester_id WHERE q.id=$1`, targetID).Scan(&qi, &explanation, &contact, &kind, &qstatus, &name, &nick)
+			var verificationAnswer, privateDetail *string
+			e = s.db.QueryRow(c, `SELECT q.id,q.explanation,q.contact_method,q.kind,q.status,p.item_name,u.nickname,q.verification_answer,p.private_verification_detail FROM requests q JOIN posts p ON p.id=q.post_id JOIN users u ON u.id=q.requester_id WHERE q.id=$1`, targetID).Scan(&qi, &explanation, &contact, &kind, &qstatus, &name, &nick, &verificationAnswer, &privateDetail)
 			if e == nil {
-				target = gin.H{"id": qi, "explanation": explanation, "contact_method": contact, "kind": kind, "status": qstatus, "item_name": name, "requester_nickname": nick}
+				target = gin.H{"id": qi, "explanation": explanation, "contact_method": contact, "kind": kind, "status": qstatus, "item_name": name, "requester_nickname": nick, "verification_answer": verificationAnswer, "private_verification_detail": privateDetail}
 			}
 		}
 		item["target"] = target

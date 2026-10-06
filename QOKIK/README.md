@@ -78,11 +78,13 @@ go test ./... -run TestPostgresAPIAuthAndModeration -count=1
 
 测试会在该数据库中创建并删除独立 schema。请只将专用测试库配置到 `TEST_DATABASE_URL`。
 
-浏览器流程使用 Compose 中运行的 Go API，先确保 `.env` 内管理员账号对应新数据库初始化时的凭据，再在终端设置 `HDUHELP_E2E_ADMIN_PASSWORD` 并启动 E2E Vite：
+浏览器流程使用 Go API 和 PostgreSQL。建议用专用测试 schema 运行，避免把 E2E 用户和内容写入日常开发数据。设置 API 所用的数据库 URL、管理员账号和密码；E2E 会把其中一条测试内容的审核时间回拨 30 天，再通过页面确认有效性。安装 Playwright 和 psycopg 后启动 E2E Vite：
 
 ```powershell
-python -m pip install playwright
+python -m pip install playwright "psycopg[binary]"
 python -m playwright install chromium
+$env:HDUHELP_E2E_DATABASE_URL = "与 API 使用同一测试 schema 的 PostgreSQL URL"
+$env:HDUHELP_E2E_ADMIN_USERNAME = "测试管理员用户名"
 $env:HDUHELP_E2E_ADMIN_PASSWORD = "与 .env 中的管理员密码相同"
 cd frontend
 npm run dev -- --config e2e/vite.config.ts
